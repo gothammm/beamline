@@ -4,13 +4,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { openStore } from "./store.js";
+import pkg from "../package.json";
 
 export async function runServer() {
 const dir = join(process.cwd(), ".beamline");
 mkdirSync(dir, { recursive: true });
 const store = openStore(join(dir, "beamline.db"));
 
-const server = new McpServer({ name: "beamline", version: "0.2.0" });
+const server = new McpServer({ name: "beamline", version: (pkg as { version?: string })?.version ?? "0.0.0" });
 const text = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v) }] });
 
 server.registerTool("beamline_register", {

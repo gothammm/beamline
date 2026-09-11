@@ -2,11 +2,11 @@
 import { parseArgs } from "node:util";
 import { COMMANDS, parseCommand, type CommandDef } from "./commands.js";
 import { c, crash, type Ctx } from "./output.js";
+import pkg from "../package.json";
 
-const VERSION = await Bun.file(new URL("../package.json", import.meta.url))
-  .json()
-  .then((p: { version: string }) => p.version)
-  .catch(() => "0.0.0");
+// Static import so `bun build --compile` embeds the version;
+// a runtime file read would miss in the standalone binary.
+const VERSION = (pkg as { version?: string })?.version ?? "0.0.0";
 
 function printCommandHelp(def: CommandDef) {
   const opts = def.options
