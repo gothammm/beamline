@@ -30,6 +30,12 @@ export function openStore(dbPath: string) {
       to_id TEXT, thread_id TEXT, body TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cursors (
       agent_id TEXT PRIMARY KEY, upto_seq INTEGER NOT NULL DEFAULT 0);`);
+  // Migration: quiet flag for log-without-wake (pre-v0.3 rows read as non-quiet).
+  try {
+    db.exec(`ALTER TABLE messages ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0`);
+  } catch {
+    /* column already there */
+  }
 
   const qAgent = db.query("SELECT id, name FROM agents WHERE id = ?");
   const qNameTaken = db.query("SELECT 1 FROM agents WHERE name = ?");
@@ -74,19 +80,31 @@ export function openStore(dbPath: string) {
     return (db.query("SELECT upto_seq FROM cursors WHERE agent_id = ?").get(agent_id) as { upto_seq: number } | null)?.upto_seq ?? 0;
   }
 
-  function poll(agent_id: string, after_seq?: number): Message[] {
+  // Log-without-wake: recorded for explicit reads, never injected by wake paths.
+  // to_id omitted = every agent; set = one peer's FYI. Fire-and-forget — the
+  // wake path may ack past quiet seqs, so guaranteed delivery needs send().
+  function log(from_id: string, body: string, to_id?: string, thread_id?: string): Message {
+    if (!agent(from_id)) throw new Error(`unknown sender: ${from_id}`);
+    if (to_id && !agent(to_id)) throw new Error(`unknown recipient: ${to_id}`);
+    db.query(
+      "INSERT INTO messages (from_id, to_id, thread_id, body, quiet, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+    ).run(from_id, to_id ?? null, thread_id ?? null, body, Date.now());
+    return db.query("SELECT seq, from_id, to_id, thread_id, body FROM messages WHERE seq = last_insert_rowid()").get() as Message;
+  }
+
+  function poll(agent_id: string, after_seq?: number, includeQuiet = false): Message[] {
     const after = after_seq ?? cursor(agent_id);
     return db.query(
-      "SELECT seq, from_id, to_id, thread_id, body FROM messages WHERE seq > ? AND (to_id = ? OR to_id IS NULL) ORDER BY seq",
-    ).all(after, agent_id) as Message[];
+      "SELECT seq, from_id, to_id, thread_id, body FROM messages WHERE seq > ? AND (to_id = ? OR to_id IS NULL) AND (quiet = 0 OR ? = 1) ORDER BY seq",
+    ).all(after, agent_id, includeQuiet ? 1 : 0) as Message[];
   }
 
   // ponytail: sleep-poll loop, ceiling is ~250ms latency + one wake per agent;
   // upgrade to pub/sub notify (SSE/broker) when multi-host or sub-100ms matters.
-  async function wait(agent_id: string, after_seq?: number, timeout_ms = 30000): Promise<Message[]> {
+  async function wait(agent_id: string, after_seq?: number, timeout_ms = 30000, includeQuiet = false): Promise<Message[]> {
     const deadline = Date.now() + timeout_ms;
     for (;;) {
-      const rows = poll(agent_id, after_seq);
+      const rows = poll(agent_id, after_seq, includeQuiet);
       if (rows.length || Date.now() >= deadline) return rows;
       await sleep(250);
     }
@@ -108,7 +126,7 @@ export function openStore(dbPath: string) {
     return r.changes > 0;
   }
 
-  return { register, agent, listAgents, send, broadcast, poll, wait, ack, cursor, unregister };
+  return { register, agent, listAgents, send, broadcast, log, poll, wait, ack, cursor, unregister };
 }
 
 export type Store = ReturnType<typeof openStore>;

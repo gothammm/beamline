@@ -249,6 +249,26 @@ export const COMMANDS: CommandDef[] = [
     },
   },
   {
+    name: "log",
+    description: "Record a log line without waking anyone. Peers read it on explicit poll.",
+    examples: ['beamline log --from apollo-1a2b --body "deployed"', 'beamline log --from apollo-1a2b --to astra-368e --body "fyi"'],
+    options: [
+      { long: "from", required: true, description: "Sender agent id" },
+      { long: "body", required: true, description: "Log text" },
+      { long: "to", description: "One peer's FYI (omit: every agent can read it)" },
+      { long: "thread", description: "Optional thread id" },
+    ],
+    run(values, _pos, ctx) {
+      need(values, ["from", "body"], ctx);
+      try {
+        const m = useStore().log(values.from as string, values.body as string, asStr(values.to), asStr(values.thread));
+        data(ctx, m, () => `Logged ${c("gray", `[seq=${m.seq}]`)}`);
+      } catch (e) {
+        crash(ctx, e, "verify ids with 'beamline agents'");
+      }
+    },
+  },
+  {
     name: "poll",
     description: "Fetch messages for an agent after a seq (defaults to its ack cursor).",
     examples: ["beamline poll --agent astra-368e", "beamline poll --agent astra-368e --after 12"],
@@ -256,11 +276,12 @@ export const COMMANDS: CommandDef[] = [
       { long: "agent", required: true, description: "Agent id" },
       { long: "after", description: "Only messages with seq greater than this" },
       { long: "hook", description: "Machine format: lines or claude (byte-frozen)" },
+      { long: "include-quiet", type: "boolean", description: "Also return quiet log lines" },
     ],
     run(values, _pos, ctx) {
       need(values, ["agent"], ctx);
       const after = asStr(values.after) ? Number(values.after) : undefined;
-      const rows = useStore().poll(values.agent as string, after);
+      const rows = useStore().poll(values.agent as string, after, values["include-quiet"] === true);
       const hook = asStr(values.hook);
       if (hook) printHook(rows, hook);
       else data(ctx, rows, () => (rows.length ? rows.map(mailLine).join("\n") : c("gray", "(no mail)")));
@@ -274,11 +295,12 @@ export const COMMANDS: CommandDef[] = [
       { long: "agent", required: true, description: "Agent id" },
       { long: "after", description: "Only messages with seq greater than this" },
       { long: "timeout", description: "Max wait in ms (default 30000)" },
+      { long: "include-quiet", type: "boolean", description: "Also resolve on quiet log lines" },
     ],
     async run(values, _pos, ctx) {
       need(values, ["agent"], ctx);
       const after = asStr(values.after) ? Number(values.after) : undefined;
-      const rows = await useStore().wait(values.agent as string, after, asStr(values.timeout) ? Number(values.timeout) : 30000);
+      const rows = await useStore().wait(values.agent as string, after, asStr(values.timeout) ? Number(values.timeout) : 30000, values["include-quiet"] === true);
       data(ctx, rows, () => (rows.length ? rows.map(mailLine).join("\n") : c("gray", "(timed out, no mail)")));
     },
   },

@@ -35,7 +35,10 @@ Then, from any session (MCP tools or CLI):
 - `beamline_send { from_id, to_id, body }` / `beamline_broadcast { from_id, body }`
 - `beamline_poll { agent_id }` → read; `beamline_ack { agent_id, upto_seq }` → clear
 - `beamline_wait { agent_id, timeout_ms }` → end your turn with this while you wait for mail; a peer's send resolves it mid-turn
+- `beamline_log { from_id, body }` → record without waking anyone; peers read it on explicit poll
 - `beamline_list_agents` → who's on the bus
+
+You send when you need a reply. You log when you don't. A send spends your peer's tokens.
 
 You store state in `<workspace>/.beamline/` (db + session links). The bus follows the workspace: `cd` elsewhere, run `init`, you get a fresh bus.
 

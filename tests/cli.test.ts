@@ -132,6 +132,15 @@ describe("cli surface", () => {
     expect(JSON.parse(run(["agents"], d).out)).toEqual([]);
   });
 
+  test("log hides from poll, shows with --include-quiet", () => {
+    const d = tmp();
+    const a = JSON.parse(run(["register", "--name", "Alf"], d).out);
+    run(["log", "--from", a.id, "--body", "status"], d);
+    expect(JSON.parse(run(["poll", "--agent", a.id], d).out)).toEqual([]);
+    const rows = JSON.parse(run(["poll", "--agent", a.id, "--include-quiet"], d).out);
+    expect(rows.map((m: { body: string }) => m.body)).toContain("status");
+  });
+
   test("doctor --json is parseable", () => {
     const d = tmp();
     const r = run(["-C", d, "doctor", "--json"], tmp());

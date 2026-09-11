@@ -132,11 +132,11 @@ async function mcpSmoke(): Promise<Check> {
     const res = await waitFor(2);
     void reader;
     const names = (res.result?.tools ?? []).map((t: { name: string }) => t.name);
-    const want = ["beamline_register", "beamline_send", "beamline_broadcast", "beamline_poll", "beamline_wait", "beamline_ack", "beamline_list_agents", "beamline_unregister"];
+    const want = ["beamline_register", "beamline_send", "beamline_broadcast", "beamline_log", "beamline_poll", "beamline_wait", "beamline_ack", "beamline_list_agents", "beamline_unregister"];
     const missing = want.filter((w) => !names.includes(w));
     proc.kill();
     if (missing.length) return { ...base, detail: `missing tools: ${missing.join(",")}`, fix: "`beamline mcp` is stale — reinstall" };
-    return { ...base, ok: true, detail: `8 tools via \`${bin} mcp\`` };
+    return { ...base, ok: true, detail: `${want.length} tools via \`${bin} mcp\`` };
   } catch (e) {
     try {
       proc?.kill();

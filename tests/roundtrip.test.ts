@@ -58,4 +58,27 @@ describe("beamline round-trip", () => {
   test("wait times out empty", async () => {
     expect(await store.wait(apollo.id, 999, 500)).toEqual([]);
   });
+
+  test("quiet log hides from default poll, shows with flag", () => {
+    const before = store.poll(astra.id, 0, true).at(-1)?.seq ?? 0;
+    store.log(apollo.id, "status: deploying");
+    expect(store.poll(astra.id)).toEqual([]);
+    expect(store.poll(astra.id, before, true).map((m) => m.body)).toContain("status: deploying");
+  });
+
+  test("targeted quiet log reaches only its peer", () => {
+    const bob = store.register("BobQ");
+    store.log(apollo.id, "fyi bob", bob.id);
+    expect(store.poll(bob.id, store.cursor(bob.id), true).map((m) => m.body)).toContain("fyi bob");
+    expect(store.poll(astra.id, 0, true).filter((m) => m.body === "fyi bob")).toEqual([]);
+  });
+
+  test("wait sleeps through quiet, resolves on real mail", async () => {
+    const bob = store.register("BobW");
+    const after = store.cursor(bob.id);
+    setTimeout(() => store.log(apollo.id, "noise"), 100);
+    setTimeout(() => store.send(apollo.id, bob.id, "signal"), 300);
+    const got = await store.wait(bob.id, after, 5000);
+    expect(got.map((m) => m.body)).toEqual(["signal"]);
+  });
 });

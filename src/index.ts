@@ -19,7 +19,7 @@ server.registerTool("beamline_register", {
 }, ({ name }) => text(store.register(name)));
 
 server.registerTool("beamline_send", {
-  description: "Send a direct message to one agent by id. No auth — workspace-local bus, from_id is asserted not proven.",
+  description: "Send a direct message to one agent by id. Wakes the peer (costs peer tokens) — FYI without reply goes to beamline_log. No auth — workspace-local bus, from_id is asserted not proven.",
   inputSchema: {
     from_id: z.string(), to_id: z.string(), body: z.string(),
     thread_id: z.string().optional(),
@@ -31,18 +31,28 @@ server.registerTool("beamline_broadcast", {
   inputSchema: { from_id: z.string(), body: z.string(), thread_id: z.string().optional() },
 }, ({ from_id, body, thread_id }) => text(store.broadcast(from_id, body, thread_id)));
 
+server.registerTool("beamline_log", {
+  description: "Record a log line without waking anyone. Costs your tokens, not your peer's. Peers read it on explicit poll with include_quiet. Need a reply — use beamline_send.",
+  inputSchema: {
+    from_id: z.string(), body: z.string(),
+    to_id: z.string().optional().describe("One peer's FYI; omit and every agent can read it"),
+    thread_id: z.string().optional(),
+  },
+}, ({ from_id, to_id, body, thread_id }) => text(store.log(from_id, body, to_id, thread_id)));
+
 server.registerTool("beamline_poll", {
-  description: "Fetch messages for agent_id after after_seq (defaults to last ack cursor). Does not mark read.",
-  inputSchema: { agent_id: z.string(), after_seq: z.number().optional() },
-}, ({ agent_id, after_seq }) => text(store.poll(agent_id, after_seq)));
+  description: "Fetch messages for agent_id after after_seq (defaults to last ack cursor). Does not mark read. Quiet log lines excluded unless include_quiet.",
+  inputSchema: { agent_id: z.string(), after_seq: z.number().optional(), include_quiet: z.boolean().optional() },
+}, ({ agent_id, after_seq, include_quiet }) => text(store.poll(agent_id, after_seq, include_quiet ?? false)));
 
 server.registerTool("beamline_wait", {
   description: "Block until a message arrives for agent_id or timeout_ms elapses. End turns with this instead of stopping when expecting mail. Use YOUR linked agent id — never invent one.",
   inputSchema: {
     agent_id: z.string(), after_seq: z.number().optional(),
     timeout_ms: z.number().optional().describe("Max wait, default 30000"),
+    include_quiet: z.boolean().optional().describe("Also resolve on quiet log lines; default ignores them"),
   },
-}, ({ agent_id, after_seq, timeout_ms }) => store.wait(agent_id, after_seq, timeout_ms).then(text));
+}, ({ agent_id, after_seq, timeout_ms, include_quiet }) => store.wait(agent_id, after_seq, timeout_ms, include_quiet ?? false).then(text));
 
 server.registerTool("beamline_ack", {
   description: "Advance agent_id's read cursor past upto_seq so poll/wait skip old mail.",
