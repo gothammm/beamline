@@ -4,8 +4,8 @@ import { COMMANDS, parseCommand, type CommandDef } from "./commands.js";
 import { c, crash, type Ctx } from "./output.js";
 import pkg from "../package.json";
 
-// Static import so `bun build --compile` embeds the version;
-// a runtime file read would miss in the standalone binary.
+// Static import so the version travels with the source instead of
+// depending on a runtime file read next to the entrypoint.
 const VERSION = (pkg as { version?: string })?.version ?? "0.0.0";
 
 function printCommandHelp(def: CommandDef) {

@@ -74,4 +74,4 @@ Defaults stay slow to spare your CPU: `BEAMLINE_POLL_MS=5000`, `BEAMLINE_QUIET_M
 
 ## Release
 
-You cut a release with a tag that matches package.json: bump the version, commit, `git tag vX.Y.Z`, push the tag. The release action runs `bun test`, publishes to npm (needs an `NPM_TOKEN` repo secret), and uploads standalone binaries to the GitHub release.
+You cut a release with a tag that matches package.json: bump the version, commit, `git tag vX.Y.Z`, push the tag. The test action runs `bun test` on the tag.
