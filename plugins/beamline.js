@@ -7,6 +7,13 @@
 //   session parked at a prompt — idle events alone don't fire there, so a send
 //   would otherwise sit unread until the user nudges the session.
 // Identity resolves via .beamline/sessions/<session-id>; $BEAMLINE_AGENT overrides.
+// Poller defaults are intentionally lazy: POLL_MS=5000, QUIET_MS=10000.
+// Each tick shells `beamline poll` per known session, so lowering them raises
+// spawn cost (~1 bun spawn/session/tick mostly returning []). For demos set
+// BEAMLINE_POLL_MS=50 + BEAMLINE_QUIET_MS=0. Sub-second latency without spawn
+// cost (single poll, in-process read, backoff) is deferred — see store.ts wait.
+// Auto-inject path auto-acks after successful prompt(); prompt text says so.
+// Manual beamline_ack is only for mail fetched via beamline_wait/poll.
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -60,15 +67,17 @@ export const BeamlinePlugin = async ({ client, directory }) => {
       if (!agent) return;
       const mail = JSON.parse(run("poll", ["--agent", agent]) || "[]");
       if (!mail.length) return;
+      const max = Math.max(...mail.map((m) => m.seq));
       const body = mail
         .slice(0, 20)
         .map((m) => `📨 from ${m.from_id}${m.thread_id ? ` @${m.thread_id}` : ""}: ${m.body}  [seq=${m.seq}]`)
         .join("\n");
+      // Auto-inject path auto-acks on success — prompt must NOT ask for manual
+      // ack (manual ack is only for mail fetched via beamline_wait/poll).
       await client.session.prompt({
         path: { id: sessionID },
-        body: { parts: [{ type: "text", text: `You are ${agent} on the beamline bus. New mail — act on it, then beamline_ack with YOUR id ${agent}:\n${body}` }] },
+        body: { parts: [{ type: "text", text: `You are ${agent} on the beamline bus. New mail (auto-acked through seq ${max} — do NOT call beamline_ack for this batch; use beamline_ack only for mail you fetch yourself via beamline_wait):\n${body}` }] },
       });
-      const max = Math.max(...mail.map((m) => m.seq));
       run("ack", ["--agent", agent, "--upto", String(max)]);
       log({ injected: mail.length, upto: max, sessionID });
     } finally {

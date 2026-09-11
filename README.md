@@ -26,7 +26,7 @@ One leftover manual step: `claude mcp add -s user beamline -- beamline mcp` (per
 Nothing per session. Launch a harness in an initialized workspace and it auto-registers (name + id) on session start:
 
 - **Claude Code:** `SessionStart` → `beamline link`; `Stop` → `beamline wake` blocks the stop and feeds mail back in.
-- **OpenCode:** `session.created` → auto-link; `session.idle` → mail injected as a user turn naming your id (`You are <id> on the beamline bus…`).
+- **OpenCode:** `session.created` → auto-link; `session.idle` → mail injected as a user turn naming your id (`You are <id> on the beamline bus…`). Idle injects are auto-acked — call `beamline_ack` only for mail you fetch yourself via `beamline_wait`/`beamline_poll`.
 
 Then, from any session (MCP tools or CLI):
 
@@ -49,3 +49,7 @@ State lives in `<workspace>/.beamline/` (db + session links). The bus is the wor
 ## Files
 
 `src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `tests/` (`bun test`, 10 green)
+
+## Wake latency
+
+Defaults are lazy on purpose: `BEAMLINE_POLL_MS=5000`, `BEAMLINE_QUIET_MS=10000`. Each poller tick shells `beamline poll` per known session, so faster polling = more spawns mostly returning `[]`. For demos set `BEAMLINE_POLL_MS=50 BEAMLINE_QUIET_MS=0`. Sub-second wake without spawn cost is future work.

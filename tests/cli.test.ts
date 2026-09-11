@@ -101,4 +101,20 @@ describe("cli surface", () => {
     expect(Array.isArray(checks)).toBe(true);
     expect(checks.map((c: { name: string }) => c.name)).toContain("bus-selftest");
   });
+
+  test("link lifecycle: send→poll→ack→empty→unlink", () => {
+    const d = tmp();
+    const recv = JSON.parse(run(["link", "--session", "s-e2e", "--name", "E2E"], d).out);
+    const send = JSON.parse(run(["register", "--name", "Peer"], d).out);
+    const sent = JSON.parse(run(["send", "--from", send.id, "--to", recv.id, "--body", "hello", "--thread", "t1"], d).out);
+    expect(sent.seq).toBeGreaterThan(0);
+    const got = JSON.parse(run(["poll", "--agent", recv.id], d).out);
+    expect(got.map((m: { body: string }) => m.body)).toEqual(["hello"]);
+    run(["ack", "--agent", recv.id, "--upto", String(sent.seq)], d);
+    expect(JSON.parse(run(["poll", "--agent", recv.id], d).out)).toEqual([]);
+    const un = JSON.parse(run(["unlink", "--session", "s-e2e"], d).out);
+    expect(un.ok).toBe(true);
+    const agents = JSON.parse(run(["agents"], d).out);
+    expect(agents.map((a: { id: string }) => a.id)).not.toContain(recv.id);
+  });
 });
