@@ -37,6 +37,12 @@ jobs:
       - run: bun install
       - run: bun build --compile --target=${{ matrix.target }} --outfile ${{ matrix.out }} src/cli.ts
       - run: ./${{ matrix.out }} --version
+      - name: init smoke-test in a fresh workspace
+        shell: bash
+        run: |
+          mkdir -p /tmp/blsmoke/bin /tmp/blsmoke/ws
+          cp "${{ matrix.out }}" "/tmp/blsmoke/bin/beamline${{ endsWith(matrix.out, '.exe') && '.exe' || '' }}"
+          cd /tmp/blsmoke/ws && PATH="/tmp/blsmoke/bin:$PATH" beamline init
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.out }}

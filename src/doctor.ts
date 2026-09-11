@@ -32,8 +32,12 @@ export function scopePaths(global: boolean) {
   };
 }
 
-export function bundledPlugin(): string {
-  return join(import.meta.dir, "..", "plugins", "beamline.js");
+// Text import: bun inlines the file at `bun build --compile`, so the
+// standalone binary carries the plugin. Dev runs read the same content.
+import pluginText from "../plugins/beamline.js" with { type: "text" };
+
+export function bundledPluginText(): string {
+  return pluginText;
 }
 
 // Session link files: JSON {id, pid, updated} with bare-id read compat
@@ -210,7 +214,7 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
         },
   );
 
-  const bundled = existsSync(bundledPlugin()) ? readFileSync(bundledPlugin(), "utf8") : null;
+  const bundled = bundledPluginText();
   const installed = existsSync(p.ocPlugin) ? readFileSync(p.ocPlugin, "utf8") : null;
   out.push(
     installed && bundled && installed === bundled

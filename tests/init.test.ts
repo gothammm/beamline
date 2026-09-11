@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectChecks } from "../src/doctor";
+import { bundledPluginText, collectChecks } from "../src/doctor";
 import { installOcPlugin, mergeCcHooks, mergeMcpJson, mergeOcMcp } from "../src/init";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "bl-"));
@@ -31,6 +31,10 @@ describe("init merges", () => {
     expect(after.mcpServers.other).toEqual({ command: "x" });
     expect(after.mcpServers.beamline).toEqual({ command: "beamline", args: ["mcp"] });
     expect(mergeMcpJson(f)).toBe(false);
+  });
+
+  test("bundled plugin text matches the shipped file", () => {
+    expect(bundledPluginText()).toContain("BeamlinePlugin");
   });
 
   test("plugin copy skips write when current", () => {

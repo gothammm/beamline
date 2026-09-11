@@ -1,7 +1,7 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { bundledPlugin, ensureClaudeMcp, runDoctor, scopePaths } from "./doctor.js";
+import { bundledPluginText, ensureClaudeMcp, runDoctor, scopePaths } from "./doctor.js";
 
 const LINK_CMD = "beamline link";
 const WAKE_CMD = "beamline wake --hook claude";
@@ -43,12 +43,12 @@ export function mergeOcMcp(path: string): boolean {
   return true;
 }
 
-// Copy the bundled OC wake plugin to a plugin dir. Returns true if written.
+// Write the bundled OC wake plugin to a plugin dir. Returns true if written.
 export function installOcPlugin(dst: string): boolean {
-  const src = bundledPlugin();
-  if (existsSync(dst) && readFileSync(dst, "utf8") === readFileSync(src, "utf8")) return false;
+  const text = bundledPluginText();
+  if (existsSync(dst) && readFileSync(dst, "utf8") === text) return false;
   mkdirSync(dirname(dst), { recursive: true });
-  copyFileSync(src, dst);
+  writeFileSync(dst, text);
   return true;
 }
 

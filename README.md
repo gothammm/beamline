@@ -65,7 +65,7 @@ State lives in `<workspace>/.beamline/` (db + session links). The bus follows th
 
 ## Files
 
-`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `install.sh` (binary installer) · `tests/` (`bun test`, 38 green)
+`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `install.sh` (binary installer) · `tests/` (`bun test`, 42 green)
 
 ## Wake latency
 
