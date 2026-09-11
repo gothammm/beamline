@@ -56,11 +56,16 @@ describe("link + doctor matrix", () => {
     process.chdir(d);
     try {
       const failed = (await collectChecks(false)).filter((c) => !c.ok).map((c) => c.name).sort();
-      expect(failed).toEqual(["claude-hooks", "opencode-mcp"]);
+      // Workspace merges fix claude-hooks + opencode-mcp; other entries
+      // (cli-on-path, mcp-server, opencode-plugin) are machine-global and
+      // environment-dependent, so assert subset not exact set.
+      expect(failed).toContain("claude-hooks");
+      expect(failed).toContain("opencode-mcp");
       mergeCcHooks(join(d, ".claude", "settings.json"));
       mergeOcMcp(join(d, "opencode.json"));
       const failed2 = (await collectChecks(false)).filter((c) => !c.ok).map((c) => c.name);
-      expect(failed2).toEqual([]);
+      expect(failed2).not.toContain("claude-hooks");
+      expect(failed2).not.toContain("opencode-mcp");
     } finally {
       process.chdir(cwd);
     }
