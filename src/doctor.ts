@@ -168,7 +168,7 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
     try {
       mkdirSync(p.beamDir, { recursive: true });
       const probe = join(p.beamDir, ".writable");
-      Bun.write(probe, "x");
+      await Bun.write(probe, "x");
       (await import("node:fs")).unlinkSync(probe);
       out.push({ name: "workspace", ok: true, detail: p.beamDir });
     } catch (e) {
