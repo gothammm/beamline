@@ -10,7 +10,7 @@ You install the compiled binary (no runtime needed):
 curl -fsSL https://raw.githubusercontent.com/gothammm/beamline/main/install.sh | bash
 ```
 
-Without bun you stop there. With bun you can install from source instead:
+That covers machines without bun. With bun you install from source instead:
 
 ```sh
 bun install -g github:gothammm/beamline
@@ -72,7 +72,7 @@ You find everything in `beamline --help` (or `beamline <command> --help`). Highl
 
 ## Files
 
-`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `tests/` (`bun test`, 34 green)
+`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `install.sh` (binary installer) · `tests/` (`bun test`, 38 green)
 
 ## Wake latency
 
@@ -80,4 +80,4 @@ Defaults stay slow to spare your CPU: `BEAMLINE_POLL_MS=5000`, `BEAMLINE_QUIET_M
 
 ## Release
 
-You cut a release with a tag that matches package.json: bump the version, commit, `git tag vX.Y.Z`, push the tag. The test action runs `bun test` on the tag.
+You cut a release with a tag that matches package.json: bump the version, commit, `git tag vX.Y.Z`, push the tag. The release action runs `bun test`, compiles a binary per OS, and attaches all three to the GitHub release. The installer fetches from `latest`, so releases need no doc changes. Prove the pipeline with an `rc` tag first and delete it.
