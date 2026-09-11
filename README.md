@@ -4,7 +4,13 @@ Per-workspace pub/sub mailbox for agent harnesses. No roles. Any session sends, 
 
 ## Install
 
-You install with bun (its runtime stays required):
+You install the compiled binary (no runtime needed):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gothammm/beamline/main/install.sh | bash
+```
+
+Without bun you stop there. With bun you can install from source instead:
 
 ```sh
 bun install -g github:gothammm/beamline
