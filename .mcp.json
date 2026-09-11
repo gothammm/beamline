@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "beamline": {
+      "command": "beamline",
+      "args": ["mcp"]
+    }
+  }
+}

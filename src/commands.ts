@@ -1,0 +1,338 @@
+import { parseArgs } from "node:util";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { openStore, type Message, type Store } from "./store.js";
+import { crash, c, data, debugLog, emitJson, fail, type Ctx } from "./output.js";
+import { printCompletion } from "./completion.js";
+
+export interface OptionDef {
+  long: string;
+  short?: string;
+  type?: "string" | "boolean";
+  required?: boolean;
+  description: string;
+}
+
+export interface CommandDef {
+  name: string;
+  description: string;
+  examples: string[];
+  options: OptionDef[];
+  run: (values: Record<string, string | boolean | undefined>, positionals: string[], ctx: Ctx) => Promise<void> | void;
+}
+
+// --- shared mailbox plumbing (unchanged behavior) ---
+
+let _store: Store | null = null;
+const beamDir = () => join(process.cwd(), ".beamline");
+function useStore(): Store {
+  if (!_store) {
+    mkdirSync(beamDir(), { recursive: true });
+    _store = openStore(join(beamDir(), "beamline.db"));
+  }
+  return _store;
+}
+
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  return Bun.stdin.text();
+}
+
+function sessionIdFrom(text: string): string {
+  try {
+    const j = JSON.parse(text);
+    return j.session_id ?? j.sessionID ?? j.sessionId ?? "";
+  } catch {
+    return text.match(/"session_?[Ii][Dd]?"\s*:\s*"([^"]+)"/)?.[1] ?? "";
+  }
+}
+
+async function resolveAgent(explicit: string | undefined, ctx: Ctx): Promise<string> {
+  if (explicit) return explicit;
+  if (process.env.BEAMLINE_AGENT) return process.env.BEAMLINE_AGENT;
+  const key = process.env.BEAMLINE_SESSION || sessionIdFrom(await readStdin());
+  debugLog(ctx, "wake key:", key || "(none)");
+  if (key) {
+    const f = join(beamDir(), "sessions", key);
+    if (existsSync(f)) return readFileSync(f, "utf8").trim();
+  }
+  return "";
+}
+
+const mailLine = (m: Message) =>
+  `📨 from ${m.from_id}${m.thread_id ? ` @${m.thread_id}` : ""}: ${m.body}  [seq=${m.seq}]`;
+
+// Hook formats are byte-frozen machine contracts — never gate or restyle these.
+function printHook(rows: Message[], format: string | undefined) {
+  if (format && rows.length === 0) process.exit(0);
+  if (format === "lines") {
+    for (const m of rows) console.log(mailLine(m));
+  } else if (format === "claude") {
+    emitJson({
+      decision: "block",
+      reason: "New beamline mail — read it with beamline_poll, act on it, then beamline_ack:\n" +
+        rows.slice(0, 20).map(mailLine).join("\n"),
+    });
+  } else emitJson(rows);
+}
+
+function need(values: Record<string, string | boolean | undefined>, names: string[], ctx: Ctx) {
+  for (const n of names) {
+    if (values[n] === undefined || values[n] === "") {
+      fail(ctx, `--${n} is required`, `pass --${n} <value>`);
+    }
+  }
+}
+
+const asStr = (v: string | boolean | undefined) => (typeof v === "string" ? v : undefined);
+
+export const COMMANDS: CommandDef[] = [
+  {
+    name: "register",
+    description: "Join this workspace bus. Prints {id, name} — save the id.",
+    examples: ["beamline register --name Apollo", "beamline register --name Apollo --link sess-123"],
+    options: [
+      { long: "name", description: "Preferred codename (random one if omitted or taken)" },
+      { long: "link", description: "Also write .beamline/sessions/<key> → id for hooks" },
+    ],
+    run(values, _pos, ctx) {
+      const store = useStore();
+      const a = store.register(asStr(values.name));
+      const link = asStr(values.link);
+      if (link) {
+        mkdirSync(join(beamDir(), "sessions"), { recursive: true });
+        writeFileSync(join(beamDir(), "sessions", link), a.id);
+      }
+      data(ctx, a, () => `Registered ${c("green", a.name)} as ${c("bold", a.id)}${link ? ` (linked: ${link})` : ""}`);
+    },
+  },
+  {
+    name: "link",
+    description: "Link a harness session to a beamline agent (SessionStart hook). Idempotent.",
+    examples: ["echo '{\"session_id\":\"abc\"}' | beamline link", "beamline link --session abc", "beamline link --session abc --name Apollo"],
+    options: [
+      { long: "session", description: "Harness session id (or pipe hook JSON on stdin)" },
+      { long: "name", description: "Preferred codename (or $BEAMLINE_NAME; random if omitted/taken)" },
+    ],
+    async run(values, _pos, ctx) {
+      const store = useStore();
+      const sid = asStr(values.session) || sessionIdFrom(await readStdin());
+      if (!sid) fail(ctx, "no session id", "pipe hook JSON on stdin or pass --session <id>");
+      mkdirSync(join(beamDir(), "sessions"), { recursive: true });
+      const f = join(beamDir(), "sessions", sid);
+      if (existsSync(f)) {
+        const a = store.agent(readFileSync(f, "utf8").trim());
+        if (a) {
+          data(ctx, { ...a, session: sid, linked: "existing" }, () => `${c("green", a.name)} (${a.id}) already linked to ${sid}`);
+          return;
+        }
+      }
+      const a = store.register(asStr(values.name) || process.env.BEAMLINE_NAME || undefined);
+      writeFileSync(f, a.id);
+      data(ctx, { ...a, session: sid, linked: "new" }, () => `Linked ${c("green", a.name)} (${c("bold", a.id)}) to ${sid}`);
+    },
+  },
+  {
+    name: "unlink",
+    description: "Remove a harness session's agent (SessionEnd hook). Idempotent, always exits 0.",
+    examples: ["echo '{\"session_id\":\"abc\"}' | beamline unlink", "beamline unlink --session abc", "beamline unlink --agent apollo-1a2b"],
+    options: [
+      { long: "session", description: "Harness session id (or pipe hook JSON on stdin)" },
+      { long: "agent", description: "Agent id to remove (alternative to --session)" },
+    ],
+    async run(values, _pos, ctx) {
+      const store = useStore();
+      const sid = asStr(values.session) || sessionIdFrom(await readStdin());
+      const explicit = asStr(values.agent);
+      let id = explicit ?? "";
+      let sessionFile = "";
+      if (!id && sid) {
+        sessionFile = join(beamDir(), "sessions", sid);
+        if (existsSync(sessionFile)) id = readFileSync(sessionFile, "utf8").trim();
+      }
+      if (!id) process.exit(0);
+      const existed = store.unregister(id);
+      if (sessionFile && existsSync(sessionFile)) {
+        try {
+          (await import("node:fs")).unlinkSync(sessionFile);
+        } catch {}
+      }
+      // Also sweep any other stale session files pointing at this agent (killed harnesses).
+      if (explicit) {
+        try {
+          const dir = join(beamDir(), "sessions");
+          for (const f of (await import("node:fs")).readdirSync(dir)) {
+            const p = join(dir, f);
+            try {
+              if (readFileSync(p, "utf8").trim() === id) (await import("node:fs")).unlinkSync(p);
+            } catch {}
+          }
+        } catch {}
+      }
+      data(ctx, { ok: true, id, removed: existed }, () => (existed ? `Unlinked ${c("bold", id)}` : c("gray", "(already gone)")));
+    },
+  },
+  {
+    name: "wake",
+    description: "Poll for this session's mail (Stop/idle hook). Always exits 0.",
+    examples: ["beamline wake --hook claude", "beamline wake astra-368e"],
+    options: [{ long: "hook", description: "Output format: lines (default) or claude (Stop-blocking JSON)" }],
+    async run(values, pos, ctx) {
+      const store = useStore();
+      const agent = await resolveAgent(pos[0], ctx);
+      if (!agent) process.exit(0);
+      printHook(store.poll(agent), asStr(values.hook) || "lines");
+    },
+  },
+  {
+    name: "send",
+    description: "Send a direct message to one agent by id.",
+    examples: ['beamline send --from apollo-1a2b --to astra-368e --body "go"'],
+    options: [
+      { long: "from", required: true, description: "Sender agent id" },
+      { long: "to", required: true, description: "Recipient agent id" },
+      { long: "body", required: true, description: "Message text" },
+      { long: "thread", description: "Optional thread id" },
+    ],
+    run(values, _pos, ctx) {
+      need(values, ["from", "to", "body"], ctx);
+      try {
+        const m = useStore().send(values.from as string, values.to as string, values.body as string, asStr(values.thread));
+        data(ctx, m, () => `Sent to ${c("bold", m.to_id ?? "")} ${c("gray", `[seq=${m.seq}]`)}`);
+      } catch (e) {
+        crash(ctx, e, "verify ids with 'beamline agents'");
+      }
+    },
+  },
+  {
+    name: "broadcast",
+    description: "Send a message to every agent on this workspace bus.",
+    examples: ['beamline broadcast --from apollo-1a2b --body "standup in 5"'],
+    options: [
+      { long: "from", required: true, description: "Sender agent id" },
+      { long: "body", required: true, description: "Message text" },
+      { long: "thread", description: "Optional thread id" },
+    ],
+    run(values, _pos, ctx) {
+      need(values, ["from", "body"], ctx);
+      try {
+        const m = useStore().broadcast(values.from as string, values.body as string, asStr(values.thread));
+        data(ctx, m, () => `Broadcast ${c("gray", `[seq=${m.seq}]`)}`);
+      } catch (e) {
+        crash(ctx, e, "verify the sender id with 'beamline agents'");
+      }
+    },
+  },
+  {
+    name: "poll",
+    description: "Fetch messages for an agent after a seq (defaults to its ack cursor).",
+    examples: ["beamline poll --agent astra-368e", "beamline poll --agent astra-368e --after 12"],
+    options: [
+      { long: "agent", required: true, description: "Agent id" },
+      { long: "after", description: "Only messages with seq greater than this" },
+      { long: "hook", description: "Machine format: lines or claude (byte-frozen)" },
+    ],
+    run(values, _pos, ctx) {
+      need(values, ["agent"], ctx);
+      const after = asStr(values.after) ? Number(values.after) : undefined;
+      const rows = useStore().poll(values.agent as string, after);
+      const hook = asStr(values.hook);
+      if (hook) printHook(rows, hook);
+      else data(ctx, rows, () => (rows.length ? rows.map(mailLine).join("\n") : c("gray", "(no mail)")));
+    },
+  },
+  {
+    name: "wait",
+    description: "Block until mail arrives for an agent or the timeout elapses.",
+    examples: ["beamline wait --agent astra-368e --timeout 30000"],
+    options: [
+      { long: "agent", required: true, description: "Agent id" },
+      { long: "after", description: "Only messages with seq greater than this" },
+      { long: "timeout", description: "Max wait in ms (default 30000)" },
+    ],
+    async run(values, _pos, ctx) {
+      need(values, ["agent"], ctx);
+      const after = asStr(values.after) ? Number(values.after) : undefined;
+      const rows = await useStore().wait(values.agent as string, after, asStr(values.timeout) ? Number(values.timeout) : 30000);
+      data(ctx, rows, () => (rows.length ? rows.map(mailLine).join("\n") : c("gray", "(timed out, no mail)")));
+    },
+  },
+  {
+    name: "ack",
+    description: "Advance an agent's read cursor past a seq so poll/wait skip old mail.",
+    examples: ["beamline ack --agent astra-368e --upto 12"],
+    options: [
+      { long: "agent", required: true, description: "Agent id" },
+      { long: "upto", required: true, description: "Sequence number to ack through" },
+    ],
+    run(values, _pos, ctx) {
+      need(values, ["agent", "upto"], ctx);
+      useStore().ack(values.agent as string, Number(values.upto));
+      data(ctx, { ok: true }, () => `Acked through seq ${c("bold", String(values.upto))}`);
+    },
+  },
+  {
+    name: "agents",
+    description: "List all agents registered on this workspace bus.",
+    examples: ["beamline agents"],
+    options: [],
+    run(_values, _pos, ctx) {
+      const list = useStore().listAgents();
+      data(ctx, list, () => (list.length ? list.map((a) => `${c("bold", a.id)}  ${a.name}`).join("\n") : c("gray", "(no agents — beamline register)")));
+    },
+  },
+  {
+    name: "mcp",
+    description: "Run the MCP stdio server (used by harness configs, not by hand).",
+    examples: [],
+    options: [],
+    async run() {
+      const { runServer } = await import("./index.js");
+      await runServer();
+    },
+  },
+  {
+    name: "init",
+    description: "Initialize beamline for a workspace (or --global for the machine). Verifies after.",
+    examples: ["beamline init", "beamline init --global"],
+    options: [{ long: "global", type: "boolean", description: "Machine scope instead of workspace" }],
+    async run(values) {
+      const { runInit } = await import("./init.js");
+      process.exit((await runInit(values.global === true)) ? 1 : 0);
+    },
+  },
+  {
+    name: "doctor",
+    description: "Check the beamline setup and report what is broken, with fixes.",
+    examples: ["beamline doctor", "beamline doctor --global", "beamline doctor --json"],
+    options: [
+      { long: "global", type: "boolean", description: "Machine scope instead of workspace" },
+      { long: "json", type: "boolean", description: "Machine-readable report" },
+    ],
+    async run(values, _pos, ctx) {
+      const { runDoctor } = await import("./doctor.js");
+      const asJson = ctx.json || values.json === true;
+      process.exit((await runDoctor(values.global === true, asJson)) ? 1 : 0);
+    },
+  },
+  {
+    name: "completion",
+    description: "Print a shell completion script (bash, zsh, or fish).",
+    examples: ["beamline completion bash > ~/.local/share/bash-completion/completions/beamline"],
+    options: [],
+    run(_values, pos, ctx) {
+      printCompletion(pos[0] ?? "", ctx);
+    },
+  },
+];
+
+export function parseCommand(def: CommandDef, argv: string[], ctx: Ctx) {
+  const tokens: Record<string, { type: "string" | "boolean"; short?: string }> = {};
+  for (const o of def.options) tokens[o.long] = o.short ? { type: o.type ?? "string", short: o.short } : { type: o.type ?? "string" };
+  try {
+    const { values, positionals } = parseArgs({ args: argv, options: tokens, strict: true, allowPositionals: true });
+    return { values: values as Record<string, string | boolean | undefined>, positionals };
+  } catch (e) {
+    fail(ctx, e instanceof Error ? e.message : String(e));
+  }
+}
