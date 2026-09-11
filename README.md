@@ -4,17 +4,17 @@ Per-workspace pub/sub mailbox for agent harnesses. No roles. Any session sends, 
 
 ## Install
 
-Pick one path to put `beamline` on PATH:
+You install with bun (its runtime stays required):
 
 ```sh
-# npm or bun global (needs the bun runtime on your machine)
-npm i -g beamline
-# or: bun install -g beamline
+bun install -g github:gothammm/beamline
+# pin a version:
+bun install -g github:gothammm/beamline#v0.3.0
+```
 
-# standalone binary, no runtime (from the GitHub release assets)
-curl -L -o beamline <release-url>/beamline-<os>-<arch>[.exe] && chmod +x beamline
+You develop from a checkout instead:
 
-# from checkout, for development
+```sh
 ln -s <checkout>/src/cli.ts ~/.bun/bin/beamline
 ```
 
