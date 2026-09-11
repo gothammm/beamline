@@ -4,10 +4,23 @@ Per-workspace pub/sub mailbox for agent harnesses. No roles. Any session sends, 
 
 ## Install
 
-```sh
-# once per machine: `beamline` on PATH
-ln -s <checkout>/src/cli.ts ~/.bun/bin/beamline
+Pick one path to put `beamline` on PATH:
 
+```sh
+# npm or bun global (needs the bun runtime on your machine)
+npm i -g beamline
+# or: bun install -g beamline
+
+# standalone binary, no runtime (from the GitHub release assets)
+curl -L -o beamline <release-url>/beamline-<os>-<arch>[.exe] && chmod +x beamline
+
+# from checkout, for development
+ln -s <checkout>/src/cli.ts ~/.bun/bin/beamline
+```
+
+Then once per machine plus once per workspace:
+
+```sh
 # once per machine: global hooks + wake plugin
 beamline init --global
 beamline doctor --global   # all green? done
@@ -58,3 +71,7 @@ You find everything in `beamline --help` (or `beamline <command> --help`). Highl
 ## Wake latency
 
 Defaults stay slow to spare your CPU: `BEAMLINE_POLL_MS=5000`, `BEAMLINE_QUIET_MS=10000`. The poller shells `beamline poll` per known session each tick, so faster polling spends spawns on `[]` results. For demos you set `BEAMLINE_POLL_MS=50 BEAMLINE_QUIET_MS=0`. We have not built sub-second wake without the spawn cost.
+
+## Release
+
+You cut a release with a tag that matches package.json: bump the version, commit, `git tag vX.Y.Z`, push the tag. The release action runs `bun test`, publishes to npm (needs an `NPM_TOKEN` repo secret), and uploads standalone binaries to the GitHub release.
