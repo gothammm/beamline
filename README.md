@@ -1,6 +1,6 @@
 # Beamline
 
-Per-workspace pub/sub mailbox for agent harnesses. No roles — any session can send, every session receives. Whoever sends dictates; roles swap freely.
+Per-workspace pub/sub mailbox for agent harnesses. No roles. Any session sends, each session receives. The sender dictates.
 
 ## Install
 
@@ -19,39 +19,39 @@ beamline doctor            # all green? done
 
 (`init` merges without clobbering; re-runs are idempotent. `doctor` prints a fix hint per failing check.)
 
-No manual MCP step: `beamline doctor --fix --global` registers the Claude Code MCP (`claude mcp add -s user beamline -- beamline mcp`); workspace `init` never touches user-global config.
+Register the Claude Code MCP with `beamline doctor --fix --global`. Workspace `init` leaves your user-global config alone.
 
-Trust: the bus is workspace-local with no auth — `from_id` is asserted, not proven (same trust as the filesystem). Sender binding becomes mandatory if multi-user/remote ever lands.
+The bus is workspace-local with no auth. Treat `from_id` as a claim, like a git author. You add sender binding before multi-user or remote use.
 
 ## Use
 
-Nothing per session. Launch a harness in an initialized workspace and it auto-registers (name + id) on session start:
+You do nothing per session. Launch a harness in an initialized workspace and the start hook registers it (name + id):
 
-- **Claude Code:** `SessionStart` → `beamline link`; `Stop` → `beamline wake` blocks the stop and feeds mail back in.
-- **OpenCode:** `session.created` → auto-link; `session.idle` → mail injected as a user turn naming your id (`You are <id> on the beamline bus…`). Idle injects are auto-acked — call `beamline_ack` only for mail you fetch yourself via `beamline_wait`/`beamline_poll`.
+- **Claude Code:** on `SessionStart` you run `beamline link`; on `Stop`, `beamline wake` holds the stop and returns new mail.
+- **OpenCode:** the plugin links on `session.created` and injects mail as a user turn on `session.idle`. The turn names your id (`You are <id> on the beamline bus…`). The plugin acks idle injects for you. You call `beamline_ack` only for mail you fetch with `beamline_wait`/`beamline_poll`.
 
 Then, from any session (MCP tools or CLI):
 
 - `beamline_send { from_id, to_id, body }` / `beamline_broadcast { from_id, body }`
 - `beamline_poll { agent_id }` → read; `beamline_ack { agent_id, upto_seq }` → clear
-- `beamline_wait { agent_id, timeout_ms }` → end turns with this when expecting mail; a send lands mid-turn
+- `beamline_wait { agent_id, timeout_ms }` → end your turn with this while you wait for mail; a peer's send resolves it mid-turn
 - `beamline_list_agents` → who's on the bus
 
-State lives in `<workspace>/.beamline/` (db + session links). The bus is the workspace: `cd` elsewhere, `init`, get a fresh one.
+You store state in `<workspace>/.beamline/` (db + session links). The bus follows the workspace: `cd` elsewhere, run `init`, you get a fresh bus.
 
 ## CLI
 
-`beamline --help` (or `beamline <command> --help`) documents everything. Highlights:
+You find everything in `beamline --help` (or `beamline <command> --help`). Highlights:
 
 - `--version`, `--debug` (full stacks), `--json` (machine output; default when piped)
 - `-C, --workspace <path>` — run any command against another workspace
 - `beamline completion bash|zsh|fish` — shell completion
-- Terminals get human-readable tables; pipes keep byte-stable JSON (hooks depend on it)
+- You see human-readable tables in a terminal. Piped output stays byte-stable JSON (hooks parse it).
 
 ## Files
 
-`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `tests/` (`bun test`, 10 green)
+`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `tests/` (`bun test`, 34 green)
 
 ## Wake latency
 
-Defaults are lazy on purpose: `BEAMLINE_POLL_MS=5000`, `BEAMLINE_QUIET_MS=10000`. Each poller tick shells `beamline poll` per known session, so faster polling = more spawns mostly returning `[]`. For demos set `BEAMLINE_POLL_MS=50 BEAMLINE_QUIET_MS=0`. Sub-second wake without spawn cost is future work.
+Defaults stay slow to spare your CPU: `BEAMLINE_POLL_MS=5000`, `BEAMLINE_QUIET_MS=10000`. The poller shells `beamline poll` per known session each tick, so faster polling spends spawns on `[]` results. For demos you set `BEAMLINE_POLL_MS=50 BEAMLINE_QUIET_MS=0`. We have not built sub-second wake without the spawn cost.
