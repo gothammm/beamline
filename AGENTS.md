@@ -18,4 +18,4 @@ Messages describe the feature. Never the author, process, or tooling.
 
 ## Branches
 
-Work lands on `v0.3-dogfood-hardening`. One agent, one short branch, merge with `--no-ff`, delete after.
+Work lands on `main`. One agent, one short branch, merge with `--no-ff`, delete after.
