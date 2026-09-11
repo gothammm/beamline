@@ -23,7 +23,12 @@ export function scopePaths(global: boolean) {
     ocConfig: global
       ? join(homedir(), ".config", "opencode", "opencode.json")
       : join(ws, "opencode.json"),
-    ocPlugin: join(homedir(), ".config", "opencode", "plugins", "beamline.js"),
+    // Workspace scope checks the project plugin dir (OpenCode auto-loads
+    // .opencode/plugins/). Global scope keeps the machine-wide copy.
+    ocPlugin: global
+      ? join(homedir(), ".config", "opencode", "plugins", "beamline.js")
+      : join(ws, ".opencode", "plugins", "beamline.js"),
+    mcpJson: global ? "" : join(ws, ".mcp.json"),
   };
 }
 
@@ -214,7 +219,7 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
           name: "opencode-plugin",
           ok: false,
           detail: !installed ? `${p.ocPlugin} not installed` : "installed copy differs from bundled (stale)",
-          fix: "`beamline init --global`",
+          fix: "`beamline init`",
         },
   );
 
@@ -267,12 +272,16 @@ export function ensureClaudeMcp(): { ok: boolean; detail: string } {
 
 export async function runDoctor(global: boolean, json = false, fix = false): Promise<number> {
   const p = scopePaths(global);
-  // stderr: stdout stays byte-stable JSON when piped (hooks depend on it).
-  if (fix && !global) console.error("note: --fix applies to --global (Claude user config is machine scope)");
   let fixLine = "";
   if (fix && global) {
     const r = ensureClaudeMcp();
     fixLine = r.ok ? `  + ${r.detail}` : `  ! ${r.detail}`;
+  }
+  if (fix && !global) {
+    // Workspace scope: project .mcp.json covers Claude Code, no user-global mutation.
+    const { mergeMcpJson } = await import("./init.js");
+    // stderr: stdout stays byte-stable JSON when piped (hooks depend on it).
+    console.error(mergeMcpJson(p.mcpJson) ? `  + mcp.beamline added (${p.mcpJson})` : `  = .mcp.json already set (${p.mcpJson})`);
   }
   const checks = await collectChecks(global);
   if (json) {

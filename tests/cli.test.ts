@@ -100,12 +100,13 @@ describe("cli surface", () => {
     expect(r.out).toContain("--fix");
   });
 
-  test("workspace doctor --fix hints at --global, never touches user config", () => {
+  test("workspace doctor --fix writes project .mcp.json", () => {
     const d = tmp();
     const r = run(["doctor", "--fix", "--json"], d);
     const checks = JSON.parse(r.out);
     expect(Array.isArray(checks)).toBe(true);
-    expect(r.err).toContain("--global");
+    const mcp = JSON.parse(readFileSync(join(d, ".mcp.json"), "utf8"));
+    expect(mcp.mcpServers.beamline).toEqual({ command: "beamline", args: ["mcp"] });
   });
 
   test("link writes JSON, wake resolves it via stdin", () => {

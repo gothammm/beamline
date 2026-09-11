@@ -43,13 +43,26 @@ export function mergeOcMcp(path: string): boolean {
   return true;
 }
 
-// Install the OC wake plugin to the global plugin dir. Returns true if written.
-function installOcPlugin(): boolean {
+// Copy the bundled OC wake plugin to a plugin dir. Returns true if written.
+export function installOcPlugin(dst: string): boolean {
   const src = bundledPlugin();
-  const dst = join(homedir(), ".config", "opencode", "plugins", "beamline.js");
   if (existsSync(dst) && readFileSync(dst, "utf8") === readFileSync(src, "utf8")) return false;
   mkdirSync(dirname(dst), { recursive: true });
   copyFileSync(src, dst);
+  return true;
+}
+
+// Merge the beamline server into a Claude Code .mcp.json without clobbering.
+// Returns true if written.
+export function mergeMcpJson(path: string): boolean {
+  const cur = (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {}) as {
+    mcpServers?: Record<string, unknown>;
+  };
+  if (cur.mcpServers?.beamline) return false;
+  cur.mcpServers ??= {};
+  cur.mcpServers.beamline = { command: "beamline", args: ["mcp"] };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(cur, null, 2) + "\n");
   return true;
 }
 
@@ -66,7 +79,15 @@ export async function runInit(global: boolean): Promise<number> {
   }
   for (const a of mergeCcHooks(p.ccSettings)) done.push(`hook added: ${a} (${p.ccSettings})`);
   if (mergeOcMcp(p.ocConfig)) done.push(`mcp.beamline added (${p.ocConfig})`);
-  if (global && installOcPlugin()) done.push("opencode plugin installed");
+  // Project plugin dir: OpenCode auto-loads .opencode/plugins/, so workspace
+  // init alone wires up wake. Global scope keeps the machine-wide copy.
+  const pluginDst = global
+    ? join(homedir(), ".config", "opencode", "plugins", "beamline.js")
+    : join(process.cwd(), ".opencode", "plugins", "beamline.js");
+  if (installOcPlugin(pluginDst)) done.push(`opencode plugin installed (${pluginDst})`);
+  if (!global && mergeMcpJson(join(process.cwd(), ".mcp.json"))) {
+    done.push("mcp.beamline added (.mcp.json)");
+  }
   // Machine scope only: workspace init never mutates user-global config.
   if (global) {
     const r = ensureClaudeMcp();
@@ -74,10 +95,6 @@ export async function runInit(global: boolean): Promise<number> {
   }
 
   console.log(done.length ? "--- wrote ---\n" + done.map((d) => `  + ${d}`).join("\n") : "--- wrote ---\n  (nothing — already set up)");
-  if (!global) {
-    console.log("note: the OpenCode wake plugin installs once per machine — `beamline init --global`");
-    console.log("note: the Claude Code MCP registers once per machine — `beamline doctor --fix --global`");
-  }
   console.log("--- after ---");
   return runDoctor(global);
 }

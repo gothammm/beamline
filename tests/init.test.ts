@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectChecks } from "../src/doctor";
-import { mergeCcHooks, mergeOcMcp } from "../src/init";
+import { installOcPlugin, mergeCcHooks, mergeMcpJson, mergeOcMcp } from "../src/init";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "bl-"));
 
@@ -20,6 +20,25 @@ describe("init merges", () => {
     expect(after.hooks.PreToolUse.length).toBe(1);
     expect(JSON.stringify(after.hooks.SessionStart)).toContain("beamline link");
     expect(mergeCcHooks(f)).toEqual([]);
+  });
+
+  test("mcp.json merge preserves other servers, idempotent", () => {
+    const d = tmp();
+    const f = join(d, ".mcp.json");
+    writeFileSync(f, JSON.stringify({ mcpServers: { other: { command: "x" } } }));
+    expect(mergeMcpJson(f)).toBe(true);
+    const after = JSON.parse(readFileSync(f, "utf8"));
+    expect(after.mcpServers.other).toEqual({ command: "x" });
+    expect(after.mcpServers.beamline).toEqual({ command: "beamline", args: ["mcp"] });
+    expect(mergeMcpJson(f)).toBe(false);
+  });
+
+  test("plugin copy skips write when current", () => {
+    const d = tmp();
+    const f = join(d, "beamline.js");
+    expect(installOcPlugin(f)).toBe(true);
+    expect(installOcPlugin(f)).toBe(false);
+    expect(readFileSync(f, "utf8")).toContain("BeamlinePlugin");
   });
 
   test("oc mcp merge preserves user content, idempotent", () => {
@@ -56,16 +75,38 @@ describe("link + doctor matrix", () => {
     process.chdir(d);
     try {
       const failed = (await collectChecks(false)).filter((c) => !c.ok).map((c) => c.name).sort();
-      // Workspace merges fix claude-hooks + opencode-mcp; other entries
-      // (cli-on-path, mcp-server, opencode-plugin) are machine-global and
-      // environment-dependent, so assert subset not exact set.
+      // Workspace init fixes claude-hooks + opencode-mcp + opencode-plugin;
+      // cli-on-path + mcp-server stay environment-dependent, so assert subset.
       expect(failed).toContain("claude-hooks");
       expect(failed).toContain("opencode-mcp");
+      expect(failed).toContain("opencode-plugin");
       mergeCcHooks(join(d, ".claude", "settings.json"));
       mergeOcMcp(join(d, "opencode.json"));
+      installOcPlugin(join(d, ".opencode", "plugins", "beamline.js"));
       const failed2 = (await collectChecks(false)).filter((c) => !c.ok).map((c) => c.name);
       expect(failed2).not.toContain("claude-hooks");
       expect(failed2).not.toContain("opencode-mcp");
+      expect(failed2).not.toContain("opencode-plugin");
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  test("init wires a bare workspace end to end", async () => {
+    const d = tmp();
+    sh(["init"], d);
+    for (const f of [".beamline/sessions", ".claude/settings.json", "opencode.json", ".opencode/plugins/beamline.js", ".mcp.json"]) {
+      expect(existsSync(join(d, f))).toBe(true);
+    }
+    // Second run: idempotent, workspace checks green.
+    sh(["init"], d);
+    const cwd = process.cwd();
+    process.chdir(d);
+    try {
+      const failed = (await collectChecks(false)).filter((c) => !c.ok).map((c) => c.name);
+      expect(failed).not.toContain("claude-hooks");
+      expect(failed).not.toContain("opencode-mcp");
+      expect(failed).not.toContain("opencode-plugin");
     } finally {
       process.chdir(cwd);
     }
