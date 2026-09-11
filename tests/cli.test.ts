@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -92,6 +92,44 @@ describe("cli surface", () => {
       expect(r.out).toContain("doctor");
     }
     expect(run(["completion", "tcsh"], tmp()).code).toBe(1);
+  });
+
+  test("doctor --help lists --fix", () => {
+    const r = run(["doctor", "--help"], tmp());
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("--fix");
+  });
+
+  test("workspace doctor --fix hints at --global, never touches user config", () => {
+    const d = tmp();
+    const r = run(["doctor", "--fix", "--json"], d);
+    const checks = JSON.parse(r.out);
+    expect(Array.isArray(checks)).toBe(true);
+    expect(r.err).toContain("--global");
+  });
+
+  test("link writes JSON, wake resolves it via stdin", () => {
+    const d = tmp();
+    const linked = JSON.parse(run(["link", "--session", "s1"], d).out);
+    const raw = readFileSync(join(d, ".beamline", "sessions", "s1"), "utf8");
+    expect(JSON.parse(raw).id).toBe(linked.id);
+    // bare-id legacy links still resolve
+    writeFileSync(join(d, ".beamline", "sessions", "s2"), linked.id);
+    const r = run(["wake"], d, JSON.stringify({ session_id: "s2" }));
+    expect(r.code).toBe(0);
+  });
+
+  test("agents --stale + unlink --sweep reap dead links", () => {
+    const d = tmp();
+    const linked = JSON.parse(run(["link", "--session", "dead"], d).out);
+    const p = join(d, ".beamline", "sessions", "dead");
+    writeFileSync(p, JSON.stringify({ id: linked.id, pid: 99999999, updated: 0 }));
+    utimesSync(p, new Date(0), new Date(0)); // mtime stale + pid dead
+    const stale = JSON.parse(run(["agents", "--stale"], d).out);
+    expect(stale.map((r: { session: string }) => r.session)).toEqual(["dead"]);
+    const swept = JSON.parse(run(["unlink", "--sweep"], d).out);
+    expect(swept.swept.join(",")).toContain("dead");
+    expect(JSON.parse(run(["agents"], d).out)).toEqual([]);
   });
 
   test("doctor --json is parseable", () => {

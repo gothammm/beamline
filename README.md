@@ -19,7 +19,9 @@ beamline doctor            # all green? done
 
 (`init` merges without clobbering; re-runs are idempotent. `doctor` prints a fix hint per failing check.)
 
-One leftover manual step: `claude mcp add -s user beamline -- beamline mcp` (per machine, for Claude Code).
+No manual MCP step: `beamline doctor --fix --global` registers the Claude Code MCP (`claude mcp add -s user beamline -- beamline mcp`); workspace `init` never touches user-global config.
+
+Trust: the bus is workspace-local with no auth — `from_id` is asserted, not proven (same trust as the filesystem). Sender binding becomes mandatory if multi-user/remote ever lands.
 
 ## Use
 

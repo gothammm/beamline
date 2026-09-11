@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openStore, type Message, type Store } from "./store.js";
 import { crash, c, data, debugLog, emitJson, fail, type Ctx } from "./output.js";
@@ -38,6 +38,11 @@ async function readStdin(): Promise<string> {
   return Bun.stdin.text();
 }
 
+function writeLink(path: string, id: string) {
+  mkdirSync(join(beamDir(), "sessions"), { recursive: true });
+  writeFileSync(path, JSON.stringify({ id, pid: process.pid, updated: Date.now() }));
+}
+
 function sessionIdFrom(text: string): string {
   try {
     const j = JSON.parse(text);
@@ -53,8 +58,9 @@ async function resolveAgent(explicit: string | undefined, ctx: Ctx): Promise<str
   const key = process.env.BEAMLINE_SESSION || sessionIdFrom(await readStdin());
   debugLog(ctx, "wake key:", key || "(none)");
   if (key) {
-    const f = join(beamDir(), "sessions", key);
-    if (existsSync(f)) return readFileSync(f, "utf8").trim();
+    const { readLink } = await import("./doctor.js");
+    const link = readLink(join(beamDir(), "sessions", key));
+    if (link) return link.id;
   }
   return "";
 }
@@ -99,10 +105,7 @@ export const COMMANDS: CommandDef[] = [
       const store = useStore();
       const a = store.register(asStr(values.name));
       const link = asStr(values.link);
-      if (link) {
-        mkdirSync(join(beamDir(), "sessions"), { recursive: true });
-        writeFileSync(join(beamDir(), "sessions", link), a.id);
-      }
+      if (link) writeLink(join(beamDir(), "sessions", link), a.id);
       data(ctx, a, () => `Registered ${c("green", a.name)} as ${c("bold", a.id)}${link ? ` (linked: ${link})` : ""}`);
     },
   },
@@ -116,39 +119,61 @@ export const COMMANDS: CommandDef[] = [
     ],
     async run(values, _pos, ctx) {
       const store = useStore();
+      const { readLink } = await import("./doctor.js");
       const sid = asStr(values.session) || sessionIdFrom(await readStdin());
       if (!sid) fail(ctx, "no session id", "pipe hook JSON on stdin or pass --session <id>");
       mkdirSync(join(beamDir(), "sessions"), { recursive: true });
       const f = join(beamDir(), "sessions", sid);
       if (existsSync(f)) {
-        const a = store.agent(readFileSync(f, "utf8").trim());
+        const a = store.agent(readLink(f)?.id ?? "");
         if (a) {
+          writeLink(f, a.id); // refresh pid/mtime on re-link
           data(ctx, { ...a, session: sid, linked: "existing" }, () => `${c("green", a.name)} (${a.id}) already linked to ${sid}`);
           return;
         }
       }
       const a = store.register(asStr(values.name) || process.env.BEAMLINE_NAME || undefined);
-      writeFileSync(f, a.id);
+      writeLink(f, a.id);
       data(ctx, { ...a, session: sid, linked: "new" }, () => `Linked ${c("green", a.name)} (${c("bold", a.id)}) to ${sid}`);
     },
   },
   {
     name: "unlink",
     description: "Remove a harness session's agent (SessionEnd hook). Idempotent, always exits 0.",
-    examples: ["echo '{\"session_id\":\"abc\"}' | beamline unlink", "beamline unlink --session abc", "beamline unlink --agent apollo-1a2b"],
+    examples: ["echo '{\"session_id\":\"abc\"}' | beamline unlink", "beamline unlink --session abc", "beamline unlink --agent apollo-1a2b", "beamline unlink --sweep"],
     options: [
       { long: "session", description: "Harness session id (or pipe hook JSON on stdin)" },
       { long: "agent", description: "Agent id to remove (alternative to --session)" },
+      { long: "sweep", type: "boolean", description: "Reap all stale session links (dead pid + old mtime)" },
     ],
     async run(values, _pos, ctx) {
       const store = useStore();
+      const { linkStale, readLink } = await import("./doctor.js");
+      if (values.sweep === true) {
+        const dir = join(beamDir(), "sessions");
+        const swept: string[] = [];
+        if (existsSync(dir)) {
+          for (const f of (await import("node:fs")).readdirSync(dir)) {
+            const p = join(dir, f);
+            const hit = linkStale(p);
+            if (!hit?.stale) continue;
+            store.unregister(hit.link.id);
+            try {
+              (await import("node:fs")).unlinkSync(p);
+            } catch {}
+            swept.push(`${f}→${hit.link.id}`);
+          }
+        }
+        data(ctx, { ok: true, swept }, () => (swept.length ? `Swept ${swept.join(", ")}` : c("gray", "(nothing stale)")));
+        return;
+      }
       const sid = asStr(values.session) || sessionIdFrom(await readStdin());
       const explicit = asStr(values.agent);
       let id = explicit ?? "";
       let sessionFile = "";
       if (!id && sid) {
         sessionFile = join(beamDir(), "sessions", sid);
-        if (existsSync(sessionFile)) id = readFileSync(sessionFile, "utf8").trim();
+        if (existsSync(sessionFile)) id = readLink(sessionFile)?.id ?? "";
       }
       if (!id) process.exit(0);
       const existed = store.unregister(id);
@@ -164,7 +189,7 @@ export const COMMANDS: CommandDef[] = [
           for (const f of (await import("node:fs")).readdirSync(dir)) {
             const p = join(dir, f);
             try {
-              if (readFileSync(p, "utf8").trim() === id) (await import("node:fs")).unlinkSync(p);
+              if (readLink(p)?.id === id) (await import("node:fs")).unlinkSync(p);
             } catch {}
           }
         } catch {}
@@ -274,9 +299,22 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "agents",
     description: "List all agents registered on this workspace bus.",
-    examples: ["beamline agents"],
-    options: [],
-    run(_values, _pos, ctx) {
+    examples: ["beamline agents", "beamline agents --stale"],
+    options: [{ long: "stale", type: "boolean", description: "List stale session links instead (dead pid + old mtime)" }],
+    async run(values, _pos, ctx) {
+      if (values.stale === true) {
+        const { linkStale } = await import("./doctor.js");
+        const dir = join(beamDir(), "sessions");
+        const rows: { session: string; agent: string; reason: string }[] = [];
+        if (existsSync(dir)) {
+          for (const f of (await import("node:fs")).readdirSync(dir)) {
+            const hit = linkStale(join(dir, f));
+            if (hit?.stale) rows.push({ session: f, agent: hit.link.id, reason: hit.reason });
+          }
+        }
+        data(ctx, rows, () => (rows.length ? rows.map((r) => `${c("bold", r.session)}→${r.agent}  ${c("gray", r.reason)}`).join("\n") : c("gray", "(nothing stale)")));
+        return;
+      }
       const list = useStore().listAgents();
       data(ctx, list, () => (list.length ? list.map((a) => `${c("bold", a.id)}  ${a.name}`).join("\n") : c("gray", "(no agents — beamline register)")));
     },
@@ -304,15 +342,16 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "doctor",
     description: "Check the beamline setup and report what is broken, with fixes.",
-    examples: ["beamline doctor", "beamline doctor --global", "beamline doctor --json"],
+    examples: ["beamline doctor", "beamline doctor --global", "beamline doctor --fix --global"],
     options: [
       { long: "global", type: "boolean", description: "Machine scope instead of workspace" },
       { long: "json", type: "boolean", description: "Machine-readable report" },
+      { long: "fix", type: "boolean", description: "Attempt fixes (global scope: register Claude Code MCP)" },
     ],
     async run(values, _pos, ctx) {
       const { runDoctor } = await import("./doctor.js");
       const asJson = ctx.json || values.json === true;
-      process.exit((await runDoctor(values.global === true, asJson)) ? 1 : 0);
+      process.exit((await runDoctor(values.global === true, asJson, values.fix === true)) ? 1 : 0);
     },
   },
   {

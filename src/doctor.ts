@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { openStore } from "./store.js";
@@ -29,6 +29,62 @@ export function scopePaths(global: boolean) {
 
 export function bundledPlugin(): string {
   return join(import.meta.dir, "..", "plugins", "beamline.js");
+}
+
+// Session link files: JSON {id, pid, updated} with bare-id read compat
+// (pre-v0.3 `link` wrote the raw id string).
+export interface Link {
+  id: string;
+  pid?: number;
+  updated?: number;
+}
+
+export function readLink(path: string): Link | null {
+  try {
+    const raw = readFileSync(path, "utf8").trim();
+    if (!raw) return null;
+    if (!raw.startsWith("{")) return { id: raw };
+    const j = JSON.parse(raw) as Partial<Link>;
+    return typeof j.id === "string"
+      ? { id: j.id, pid: typeof j.pid === "number" ? j.pid : undefined }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export type PidState = "dead" | "alive" | "unknown";
+
+// kill(pid, 0) probes liveness: ESRCH = certain-dead, EPERM/other = unknown.
+// Unknown never reaps (containers, PID namespaces, foreign users, Windows).
+export function pidState(pid: number): PidState {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "ESRCH" ? "dead" : "unknown";
+  }
+}
+
+// Stale = certain-dead pid AND old mtime (both — guards pid reuse).
+// Legacy links (no pid) and unprobeable pids never auto-reap.
+export const STALE_MS = 60_000;
+
+export function linkStale(path: string, now = Date.now()): { link: Link; stale: boolean; reason: string } | null {
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+  const link = readLink(path);
+  if (!link) return null;
+  if (link.pid === undefined) return { link, stale: false, reason: "legacy link (no pid) — warn only" };
+  const ps = pidState(link.pid);
+  if (ps === "dead" && now - mtimeMs > STALE_MS) {
+    return { link, stale: true, reason: `pid ${link.pid} dead + mtime stale` };
+  }
+  return { link, stale: false, reason: ps === "unknown" ? `pid ${link.pid} unprobeable — warn only` : `pid ${link.pid} alive` };
 }
 
 function readJson(path: string): unknown | null {
@@ -176,8 +232,14 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
           ? { name: "bus-selftest", ok: true, detail: `send→poll→ack as ${found.id} (cleaned up)` }
           : { name: "bus-selftest", ok: false, detail: "round-trip mismatch", fix: "rm -rf .beamline and re-run init" },
       );
-      const links = existsSync(join(p.beamDir, "sessions")) ? (await import("node:fs")).readdirSync(join(p.beamDir, "sessions")).length : 0;
-      out.push({ name: "sessions", ok: true, detail: `${links} linked, ${store.listAgents().length} agents` });
+      const sessDir = join(p.beamDir, "sessions");
+      const files = existsSync(sessDir) ? (await import("node:fs")).readdirSync(sessDir) : [];
+      const stale = files.filter((f) => linkStale(join(sessDir, f))?.stale);
+      out.push(
+        stale.length
+          ? { name: "sessions", ok: false, detail: `${stale.length} stale link(s): ${stale.join(", ")}`, fix: "beamline unlink --sweep" }
+          : { name: "sessions", ok: true, detail: `${files.length} linked, ${store.listAgents().length} agents` },
+      );
     } catch (e) {
       out.push({ name: "bus-selftest", ok: false, detail: String(e), fix: "rm -rf .beamline and re-run init" });
     }
@@ -185,14 +247,41 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
   return out;
 }
 
-export async function runDoctor(global: boolean, json = false): Promise<number> {
+// Best-effort: register beamline MCP in Claude Code user config. Never throws —
+// workspace `init` must not mutate user-global config, so only `doctor --fix`
+// and `init --global` call this. Returns human detail for the log line.
+export function ensureClaudeMcp(): { ok: boolean; detail: string } {
+  if (!Bun.which("claude")) return { ok: false, detail: "`claude` not on PATH — run `claude mcp add -s user beamline -- beamline mcp` by hand" };
+  try {
+    const proc = Bun.spawnSync(
+      ["claude", "mcp", "add", "-s", "user", "beamline", "--", "beamline", "mcp"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    if (proc.exitCode === 0) return { ok: true, detail: "claude mcp add -s user beamline" };
+    const err = new TextDecoder().decode(proc.stderr).trim().slice(0, 200);
+    return { ok: false, detail: err || `exit ${proc.exitCode}` };
+  } catch (e) {
+    return { ok: false, detail: String(e) };
+  }
+}
+
+export async function runDoctor(global: boolean, json = false, fix = false): Promise<number> {
   const p = scopePaths(global);
+  // stderr: stdout stays byte-stable JSON when piped (hooks depend on it).
+  if (fix && !global) console.error("note: --fix applies to --global (Claude user config is machine scope)");
+  let fixLine = "";
+  if (fix && global) {
+    const r = ensureClaudeMcp();
+    fixLine = r.ok ? `  + ${r.detail}` : `  ! ${r.detail}`;
+  }
   const checks = await collectChecks(global);
   if (json) {
+    if (fixLine) console.error(fixLine);
     console.log(JSON.stringify(checks));
     return checks.filter((c) => !c.ok).length;
   }
   console.log(`beamline doctor (${p.label})`);
+  if (fixLine) console.log(`--- fix ---\n${fixLine}`);
   let failed = 0;
   for (const c of checks) {
     console.log(`${c.ok ? "[✓]" : "[✗]"} ${c.name} — ${c.detail}${!c.ok && c.fix ? ` (fix: ${c.fix})` : ""}`);

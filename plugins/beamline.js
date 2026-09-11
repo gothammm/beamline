@@ -61,8 +61,16 @@ export const BeamlinePlugin = async ({ client, directory }) => {
     try {
       let agent = process.env.BEAMLINE_AGENT;
       if (!agent) {
+        // Link files are JSON {id, pid, updated} with bare-id read compat.
         const link = join(directory, ".beamline", "sessions", String(sessionID));
-        if (existsSync(link)) agent = readFileSync(link, "utf8").trim();
+        if (existsSync(link)) {
+          const raw = readFileSync(link, "utf8").trim();
+          try {
+            agent = raw.startsWith("{") ? JSON.parse(raw).id || "" : raw;
+          } catch {
+            agent = raw;
+          }
+        }
       }
       if (!agent) return;
       const mail = JSON.parse(run("poll", ["--agent", agent]) || "[]");

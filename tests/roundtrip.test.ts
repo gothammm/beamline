@@ -33,10 +33,26 @@ describe("beamline round-trip", () => {
 
   test("wait resolves on send", async () => {
     const bob = store.register("Bob");
-    const after = store.poll(bob.id).at(-1)?.seq ?? 0; // skip pre-existing broadcasts
+    const after = store.poll(bob.id).at(-1)?.seq ?? store.cursor(bob.id); // skip pre-existing broadcasts
     setTimeout(() => store.send(apollo.id, bob.id, "ping"), 300);
     const got = await store.wait(bob.id, after, 5000);
     expect(got.map((m) => m.body)).toEqual(["ping"]);
+  });
+
+  test("new agent starts past historic broadcasts", () => {
+    store.broadcast(apollo.id, "old news");
+    const claire = store.register("Claire");
+    expect(store.poll(claire.id)).toEqual([]);
+  });
+
+  test("unregister reaps pending directs", () => {
+    const temp = store.register("Temp");
+    store.send(apollo.id, temp.id, "for-temp");
+    expect(store.poll(temp.id, 0).map((m) => m.body)).toContain("for-temp");
+    expect(store.unregister(temp.id)).toBe(true);
+    // directs to the dead agent are gone; shared broadcasts stay
+    expect(store.poll(temp.id, 0).filter((m) => m.to_id === temp.id)).toEqual([]);
+    expect(store.listAgents().map((a) => a.id)).not.toContain(temp.id);
   });
 
   test("wait times out empty", async () => {

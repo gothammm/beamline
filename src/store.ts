@@ -40,7 +40,8 @@ export function openStore(dbPath: string) {
     const id = `${name.toLowerCase()}-${crypto.randomUUID().slice(0, 4)}`;
     db.query("INSERT INTO agents (id, name, created_at) VALUES (?, ?, ?)")
       .run(id, name, Date.now());
-    db.query("INSERT OR IGNORE INTO cursors (agent_id, upto_seq) VALUES (?, 0)").run(id);
+    // New agents start past historic broadcasts — no replay of mail from before they joined.
+    db.query("INSERT OR IGNORE INTO cursors (agent_id, upto_seq) VALUES (?, (SELECT COALESCE(MAX(seq), 0) FROM messages))").run(id);
     return { id, name };
   }
 
@@ -100,6 +101,8 @@ export function openStore(dbPath: string) {
   }
 
   function unregister(agent_id: string): boolean {
+    // Reap pending directs to the dead agent (broadcasts are shared history — kept).
+    db.query("DELETE FROM messages WHERE to_id = ?").run(agent_id);
     db.query("DELETE FROM cursors WHERE agent_id = ?").run(agent_id);
     const r = db.query("DELETE FROM agents WHERE id = ?").run(agent_id);
     return r.changes > 0;
