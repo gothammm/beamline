@@ -185,14 +185,41 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
   return out;
 }
 
-export async function runDoctor(global: boolean, json = false): Promise<number> {
+// Best-effort: register beamline MCP in Claude Code user config. Never throws —
+// workspace `init` must not mutate user-global config, so only `doctor --fix`
+// and `init --global` call this. Returns human detail for the log line.
+export function ensureClaudeMcp(): { ok: boolean; detail: string } {
+  if (!Bun.which("claude")) return { ok: false, detail: "`claude` not on PATH — run `claude mcp add -s user beamline -- beamline mcp` by hand" };
+  try {
+    const proc = Bun.spawnSync(
+      ["claude", "mcp", "add", "-s", "user", "beamline", "--", "beamline", "mcp"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    if (proc.exitCode === 0) return { ok: true, detail: "claude mcp add -s user beamline" };
+    const err = new TextDecoder().decode(proc.stderr).trim().slice(0, 200);
+    return { ok: false, detail: err || `exit ${proc.exitCode}` };
+  } catch (e) {
+    return { ok: false, detail: String(e) };
+  }
+}
+
+export async function runDoctor(global: boolean, json = false, fix = false): Promise<number> {
   const p = scopePaths(global);
+  // stderr: stdout stays byte-stable JSON when piped (hooks depend on it).
+  if (fix && !global) console.error("note: --fix applies to --global (Claude user config is machine scope)");
+  let fixLine = "";
+  if (fix && global) {
+    const r = ensureClaudeMcp();
+    fixLine = r.ok ? `  + ${r.detail}` : `  ! ${r.detail}`;
+  }
   const checks = await collectChecks(global);
   if (json) {
+    if (fixLine) console.error(fixLine);
     console.log(JSON.stringify(checks));
     return checks.filter((c) => !c.ok).length;
   }
   console.log(`beamline doctor (${p.label})`);
+  if (fixLine) console.log(`--- fix ---\n${fixLine}`);
   let failed = 0;
   for (const c of checks) {
     console.log(`${c.ok ? "[✓]" : "[✗]"} ${c.name} — ${c.detail}${!c.ok && c.fix ? ` (fix: ${c.fix})` : ""}`);

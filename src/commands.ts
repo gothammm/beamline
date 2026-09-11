@@ -304,15 +304,16 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "doctor",
     description: "Check the beamline setup and report what is broken, with fixes.",
-    examples: ["beamline doctor", "beamline doctor --global", "beamline doctor --json"],
+    examples: ["beamline doctor", "beamline doctor --global", "beamline doctor --fix --global"],
     options: [
       { long: "global", type: "boolean", description: "Machine scope instead of workspace" },
       { long: "json", type: "boolean", description: "Machine-readable report" },
+      { long: "fix", type: "boolean", description: "Attempt fixes (global scope: register Claude Code MCP)" },
     ],
     async run(values, _pos, ctx) {
       const { runDoctor } = await import("./doctor.js");
       const asJson = ctx.json || values.json === true;
-      process.exit((await runDoctor(values.global === true, asJson)) ? 1 : 0);
+      process.exit((await runDoctor(values.global === true, asJson, values.fix === true)) ? 1 : 0);
     },
   },
   {

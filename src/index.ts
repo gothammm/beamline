@@ -19,7 +19,7 @@ server.registerTool("beamline_register", {
 }, ({ name }) => text(store.register(name)));
 
 server.registerTool("beamline_send", {
-  description: "Send a direct message to one agent by id.",
+  description: "Send a direct message to one agent by id. No auth — workspace-local bus, from_id is asserted not proven.",
   inputSchema: {
     from_id: z.string(), to_id: z.string(), body: z.string(),
     thread_id: z.string().optional(),
@@ -27,7 +27,7 @@ server.registerTool("beamline_send", {
 }, ({ from_id, to_id, body, thread_id }) => text(store.send(from_id, to_id, body, thread_id)));
 
 server.registerTool("beamline_broadcast", {
-  description: "Send a message to every agent on this workspace bus.",
+  description: "Send a message to every agent on this workspace bus. No auth — workspace-local bus, from_id is asserted not proven.",
   inputSchema: { from_id: z.string(), body: z.string(), thread_id: z.string().optional() },
 }, ({ from_id, body, thread_id }) => text(store.broadcast(from_id, body, thread_id)));
 

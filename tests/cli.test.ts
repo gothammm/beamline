@@ -94,6 +94,20 @@ describe("cli surface", () => {
     expect(run(["completion", "tcsh"], tmp()).code).toBe(1);
   });
 
+  test("doctor --help lists --fix", () => {
+    const r = run(["doctor", "--help"], tmp());
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("--fix");
+  });
+
+  test("workspace doctor --fix hints at --global, never touches user config", () => {
+    const d = tmp();
+    const r = run(["doctor", "--fix", "--json"], d);
+    const checks = JSON.parse(r.out);
+    expect(Array.isArray(checks)).toBe(true);
+    expect(r.err).toContain("--global");
+  });
+
   test("doctor --json is parseable", () => {
     const d = tmp();
     const r = run(["-C", d, "doctor", "--json"], tmp());

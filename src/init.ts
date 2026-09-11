@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { bundledPlugin, runDoctor, scopePaths } from "./doctor.js";
+import { bundledPlugin, ensureClaudeMcp, runDoctor, scopePaths } from "./doctor.js";
 
 const LINK_CMD = "beamline link";
 const WAKE_CMD = "beamline wake --hook claude";
@@ -67,12 +67,16 @@ export async function runInit(global: boolean): Promise<number> {
   for (const a of mergeCcHooks(p.ccSettings)) done.push(`hook added: ${a} (${p.ccSettings})`);
   if (mergeOcMcp(p.ocConfig)) done.push(`mcp.beamline added (${p.ocConfig})`);
   if (global && installOcPlugin()) done.push("opencode plugin installed");
+  // Machine scope only: workspace init never mutates user-global config.
+  if (global) {
+    const r = ensureClaudeMcp();
+    done.push(r.ok ? r.detail : `claude MCP skipped (${r.detail})`);
+  }
 
   console.log(done.length ? "--- wrote ---\n" + done.map((d) => `  + ${d}`).join("\n") : "--- wrote ---\n  (nothing — already set up)");
   if (!global) {
     console.log("note: the OpenCode wake plugin installs once per machine — `beamline init --global`");
-  } else {
-    console.log("note: register the MCP once per machine — `claude mcp add -s user beamline -- beamline mcp`");
+    console.log("note: the Claude Code MCP registers once per machine — `beamline doctor --fix --global`");
   }
   console.log("--- after ---");
   return runDoctor(global);
