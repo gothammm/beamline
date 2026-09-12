@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>beamline — per-workspace MCP mailbox for agents</title>
+  <meta name="description" content="Beamline is a per-workspace MCP mailbox for agent harnesses. Any session sends, each session receives." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0a0b'/%3E%3Crect x='7' y='14' width='18' height='4' rx='2' fill='%235eead4'/%3E%3C/svg%3E" />
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <canvas id="beams" aria-hidden="true"></canvas>
+
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top" aria-label="beamline home">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span class="brand-name">beamline</span>
+        <span class="badge">v0.3.4</span>
+      </a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#how">How it works</a>
+        <a href="#install">Install</a>
+      </nav>
+      <div class="nav-actions">
+        <button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle theme" aria-pressed="false">
+          <span class="icon-stack" aria-hidden="true">
+            <svg class="icon icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3.25"/><path d="M8 1.5v1.75M8 12.75v1.75M1.5 8h1.75M12.75 8h1.75M3.4 3.4l1.24 1.24M11.36 11.36l1.24 1.24M12.6 3.4l-1.24 1.24M4.64 11.36L3.4 12.6"/></svg>
+            <svg class="icon icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/></svg>
+          </span>
+        </button>
+        <a class="btn btn-primary btn-sm" href="https://github.com/gothammm/beamline">GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <!-- Hero -->
+    <section class="wrap hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow stagger-item">per-workspace MCP mailbox</p>
+        <h1 id="hero-title" class="stagger-item">Any session sends,<br />each session receives.</h1>
+        <p class="lede stagger-item">Your coding agents can message each other. One sends, the other wakes up and gets to work.</p>
+        <div class="install-widget stagger-item">
+          <div class="install-tabs" aria-label="Install methods">
+            <button type="button" aria-pressed="true" data-cmd="curl -fsSL https://raw.githubusercontent.com/gothammm/beamline/main/install.sh | bash">curl</button>
+            <button type="button" aria-pressed="false" data-cmd="bun install -g github:gothammm/beamline">bun</button>
+          </div>
+          <div class="install-cmd">
+            <code>curl -fsSL https://raw.githubusercontent.com/gothammm/beamline/main/install.sh | bash</code>
+            <button class="copy-btn" type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/gothammm/beamline/main/install.sh | bash" aria-label="Copy install command">
+              <span class="icon-stack" aria-hidden="true">
+                <svg class="icon icon-a" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="9" height="9" rx="2"/><path d="M10.5 5.5v-1a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h1"/></svg>
+                <svg class="icon icon-b" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg>
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Mail flow: every hop is an MCP tool call -->
+    <section class="wrap flow reveal" aria-label="How mail flows">
+      <div class="flow-node"><strong>atlas</strong><span>claude code · MCP</span></div>
+      <div class="flow-edge" aria-hidden="true"><code>beamline_send</code><span>→</span></div>
+      <div class="flow-node bus"><strong>workspace bus</strong><span>.beamline/ · sqlite</span></div>
+      <div class="flow-edge" aria-hidden="true"><code>beamline_wait</code><span>→</span></div>
+      <div class="flow-node"><strong>sol</strong><span>opencode · MCP</span></div>
+    </section>
+
+    <!-- What is beamline? -->
+    <section class="wrap section reveal" aria-labelledby="what-title">
+      <h2 id="what-title">What is beamline?</h2>
+      <p class="sub">A shared mailbox for AI coding agents working in the same project. One agent sends a message, it shows up inside the other agent’s session, and that session wakes up and acts on it. Nothing to set up per session.</p>
+    </section>
+
+    <!-- How it works -->
+    <section id="how" class="wrap section reveal" aria-labelledby="how-title">
+      <p class="kicker">How it works</p>
+      <h2 id="how-title">One session sends.<br />The other gets to work.</h2>
+      <p class="sub">Messages show up as a user turn inside the other session. Sending wakes it up; logging doesn’t.</p>
+
+      <div class="cards">
+        <article class="card">
+          <h3>Send a message</h3>
+          <p>The other session wakes up mid-turn and gets to work.</p>
+        </article>
+        <article class="card">
+          <h3>Wait for mail</h3>
+          <p>End your turn. It resumes the moment a message lands.</p>
+        </article>
+        <article class="card">
+          <h3>Leave a note</h3>
+          <p>No wake-up call. The other session just reads it later.</p>
+        </article>
+      </div>
+
+      <p class="micro">Works with Claude Code and OpenCode.</p>
+    </section>
+
+    <!-- Install -->
+    <section id="install" class="wrap section reveal" aria-labelledby="install-title">
+      <p class="kicker">Install</p>
+      <h2 id="install-title">Install once, enable per project.</h2>
+      <div class="codeblock">
+          <div class="codeblock-bar"><span>in your project</span><button class="copy-btn" type="button" data-copy="beamline init && beamline doctor" aria-label="Copy setup commands"><span class="icon-stack" aria-hidden="true"><svg class="icon icon-a" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="9" height="9" rx="2"/><path d="M10.5 5.5v-1a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h1"/></svg><svg class="icon icon-b" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg></span></button></div>
+          <pre><code>cd my-project && beamline init
+beamline doctor</code></pre>
+        </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap foot-inner">
+      <p><strong>beamline</strong> <span class="t-dim">v0.3.4 — per-workspace MCP mailbox for agent harnesses.</span></p>
+      <p class="foot-links"><a href="#how">How it works</a><a href="#install">Install</a><a href="https://github.com/gothammm/beamline">GitHub</a></p>
+    </div>
+  </footer>
+
+  <script src="./main.js" defer></script>
+</body>
+</html>
