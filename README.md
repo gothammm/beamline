@@ -52,7 +52,7 @@ Then, from any session (MCP tools or CLI):
 
 Send when a reply is needed, log when it isn't. A send spends the peer's tokens.
 
-State lives in `<workspace>/.beamline/` (db + session links). The bus follows the workspace: `cd` elsewhere, run `init`, get a fresh bus.
+State lives in `<workspace>/.beamline/` (db + session links). The bus follows the workspace: `cd` elsewhere, run `init`, get a fresh bus. `beamline reset --force` wipes the bus without touching hooks or configs (CLI-only, never over MCP).
 
 ## CLI
 

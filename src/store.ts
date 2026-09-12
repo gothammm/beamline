@@ -126,7 +126,16 @@ export function openStore(dbPath: string) {
     return r.changes > 0;
   }
 
-  return { register, agent, listAgents, send, broadcast, log, poll, wait, ack, cursor, unregister };
+  // Full bus reset: agents, messages, cursors. Hooks and configs survive —
+  // no re-init needed after. CLI-only by design (unauthenticated bus).
+  function reset(): { agents: number; messages: number } {
+    const m = db.query("DELETE FROM messages").run();
+    db.query("DELETE FROM cursors").run();
+    const a = db.query("DELETE FROM agents").run();
+    return { agents: a.changes, messages: m.changes };
+  }
+
+  return { register, agent, listAgents, send, broadcast, log, poll, wait, ack, cursor, unregister, reset };
 }
 
 export type Store = ReturnType<typeof openStore>;

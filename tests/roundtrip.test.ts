@@ -81,4 +81,17 @@ describe("beamline round-trip", () => {
     const got = await store.wait(bob.id, after, 5000);
     expect(got.map((m) => m.body)).toEqual(["signal"]);
   });
+
+  // Last: wipes the shared store, so nothing after this may use prior agents.
+  test("reset wipes agents, messages, and cursors", () => {
+    const temp = store.register("Gone");
+    store.send(apollo.id, temp.id, "last words");
+    store.broadcast(temp.id, "bye all");
+    const wiped = store.reset();
+    expect(wiped.agents).toBeGreaterThan(0);
+    expect(wiped.messages).toBeGreaterThan(0);
+    expect(store.listAgents()).toEqual([]);
+    expect(store.poll(apollo.id, 0)).toEqual([]);
+    expect(store.poll(apollo.id, 0, true)).toEqual([]);
+  });
 });

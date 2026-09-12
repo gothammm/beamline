@@ -96,17 +96,14 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "register",
     description: "Join this workspace bus. Prints {id, name} — save the id.",
-    examples: ["beamline register --name Apollo", "beamline register --name Apollo --link sess-123"],
+    examples: ["beamline register --name Apollo"],
     options: [
       { long: "name", description: "Preferred codename (random one if omitted or taken)" },
-      { long: "link", description: "Also write .beamline/sessions/<key> → id for hooks" },
     ],
     run(values, _pos, ctx) {
       const store = useStore();
       const a = store.register(asStr(values.name));
-      const link = asStr(values.link);
-      if (link) writeLink(join(beamDir(), "sessions", link), a.id);
-      data(ctx, a, () => `Registered ${c("green", a.name)} as ${c("bold", a.id)}${link ? ` (linked: ${link})` : ""}`);
+      data(ctx, a, () => `Registered ${c("green", a.name)} as ${c("bold", a.id)}`);
     },
   },
   {
@@ -339,6 +336,30 @@ export const COMMANDS: CommandDef[] = [
       }
       const list = useStore().listAgents();
       data(ctx, list, () => (list.length ? list.map((a) => `${c("bold", a.id)}  ${a.name}`).join("\n") : c("gray", "(no agents — beamline register)")));
+    },
+  },
+  {
+    name: "reset",
+    description: "Wipe this workspace's bus: all agents, messages, and session links. Hooks and configs survive — no re-init needed. CLI-only (never over MCP: the bus has no auth).",
+    examples: ["beamline reset --force"],
+    options: [
+      { long: "force", type: "boolean", description: "Required. Without it nothing happens." },
+    ],
+    async run(values, _pos, ctx) {
+      if (values.force !== true) fail(ctx, "refusing to wipe without --force", "pass --force to wipe this workspace's bus");
+      const store = useStore();
+      const { agents, messages } = store.reset();
+      let links = 0;
+      const dir = join(beamDir(), "sessions");
+      if (existsSync(dir)) {
+        for (const f of (await import("node:fs")).readdirSync(dir)) {
+          try {
+            (await import("node:fs")).unlinkSync(join(dir, f));
+            links++;
+          } catch {}
+        }
+      }
+      data(ctx, { agents, messages, links }, () => `Reset: ${agents} agents, ${messages} messages, ${links} links wiped`);
     },
   },
   {

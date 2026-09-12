@@ -179,7 +179,7 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
       const n = store.listAgents().length;
       out.push({ name: "store", ok: true, detail: `${join(p.beamDir, "beamline.db")} (${n} agents)` });
     } catch (e) {
-      out.push({ name: "store", ok: false, detail: String(e), fix: "rm -rf .beamline and re-run init" });
+      out.push({ name: "store", ok: false, detail: String(e), fix: "`beamline reset --force`" });
     }
   }
 
@@ -239,7 +239,7 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
       out.push(
         got.length === 1
           ? { name: "bus-selftest", ok: true, detail: `send→poll→ack as ${found.id} (cleaned up)` }
-          : { name: "bus-selftest", ok: false, detail: "round-trip mismatch", fix: "rm -rf .beamline and re-run init" },
+          : { name: "bus-selftest", ok: false, detail: "round-trip mismatch", fix: "`beamline reset --force`" },
       );
       const sessDir = join(p.beamDir, "sessions");
       const files = existsSync(sessDir) ? (await import("node:fs")).readdirSync(sessDir) : [];
@@ -250,7 +250,7 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
           : { name: "sessions", ok: true, detail: `${files.length} linked, ${store.listAgents().length} agents` },
       );
     } catch (e) {
-      out.push({ name: "bus-selftest", ok: false, detail: String(e), fix: "rm -rf .beamline and re-run init" });
+      out.push({ name: "bus-selftest", ok: false, detail: String(e), fix: "`beamline reset --force`" });
     }
   }
   return out;

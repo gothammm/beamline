@@ -133,6 +133,21 @@ describe("cli surface", () => {
     expect(JSON.parse(run(["agents"], d).out)).toEqual([]);
   });
 
+  test("reset refuses without --force, wipes with it", () => {
+    const d = tmp();
+    const a = JSON.parse(run(["register", "--name", "Alf"], d).out);
+    run(["link", "--session", "s1"], d);
+    const refuse = run(["reset"], d);
+    expect(refuse.code).toBe(1);
+    expect(refuse.err).toContain("--force");
+    expect(JSON.parse(run(["agents"], d).out).length).toBeGreaterThan(0);
+    const wiped = JSON.parse(run(["reset", "--force"], d).out);
+    expect(wiped.agents).toBeGreaterThan(0);
+    expect(wiped.links).toBe(1);
+    expect(JSON.parse(run(["agents"], d).out)).toEqual([]);
+    expect(JSON.parse(run(["poll", "--agent", a.id, "--include-quiet"], d).out)).toEqual([]);
+  });
+
   test("log hides from poll, shows with --include-quiet", () => {
     const d = tmp();
     const a = JSON.parse(run(["register", "--name", "Alf"], d).out);
