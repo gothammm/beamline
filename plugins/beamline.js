@@ -1,6 +1,8 @@
 // Beamline wake plugin for OpenCode. Installed once per machine by
 // `beamline init --global` → ~/.config/opencode/plugins/beamline.js.
-// - session.created: auto-register this session (name+id) and link it.
+// - session.created: auto-register this session (name+id), link it, and tell
+//   it its id (in-band identity — MCP can't resolve the caller, so without
+//   this the session registers a duplicate no wake path polls as).
 // - session.deleted: unlink + remove the agent from the bus.
 // - session.idle (fast path) + background poller (backstop): poll beamline for
 //   this session's agent; inject mail as a prompt. The poller is what wakes a
@@ -14,7 +16,7 @@
 // cost (single poll, in-process read, backoff) is deferred — see store.ts wait.
 // Auto-inject path auto-acks after successful prompt(); prompt text says so.
 // Manual beamline_ack is only for mail fetched via beamline_wait/poll.
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const sh = (args, cwd) => {
@@ -94,6 +96,12 @@ export const BeamlinePlugin = async ({ client, directory }) => {
   };
 
   const timer = setInterval(() => {
+    // ponytail: readdir rescan heals known after server restarts (memory-only
+    // set empties, parked sessions emit no events); ceiling is one dir listing
+    // per tick — track harness lifecycle events instead if that ever matters.
+    try {
+      for (const f of readdirSync(join(directory, ".beamline", "sessions"))) known.add(f);
+    } catch {}
     const now = Date.now();
     for (const sid of known) {
       if (now - (lastActivity.get(sid) ?? 0) < QUIET_MS) continue;
@@ -115,6 +123,15 @@ export const BeamlinePlugin = async ({ client, directory }) => {
           if (!sessionID) return;
           const res = JSON.parse(run("link", ["--session", String(sessionID)]) || "{}");
           log({ linked: res.id, sessionID });
+          // Identity in-band: MCP can't resolve the caller server-side, so the
+          // session must be told its id or it registers a duplicate that no
+          // wake path polls as (structurally undeliverable mail).
+          if (res.id) {
+            await client.session.prompt({
+              path: { id: sessionID },
+              body: { parts: [{ type: "text", text: `You are ${res.id} on the beamline bus (session ${sessionID}). Send, poll, wait, and ack with this id — reuse it, never beamline_register again. Peers reach you at this id.` }] },
+            });
+          }
           return;
         }
         if (event.type === "session.deleted") {

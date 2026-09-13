@@ -249,6 +249,33 @@ export async function collectChecks(global: boolean): Promise<Check[]> {
           ? { name: "sessions", ok: false, detail: `${stale.length} stale link(s): ${stale.join(", ")}`, fix: "beamline unlink --sweep" }
           : { name: "sessions", ok: true, detail: `${files.length} linked, ${store.listAgents().length} agents` },
       );
+      // Stranded mail: unacked non-quiet mail for agents no session links to.
+      // Wake can never deliver it — silent inbox until someone rebinds.
+      // Presence (not freshness) is the signal: the poller rescans link files
+      // after restarts, so any link heals; staleness stays the `sessions`
+      // check's reaping concern.
+      const live = new Set(
+        files.flatMap((f) => {
+          const id = readLink(join(sessDir, f))?.id;
+          return id ? [id] : [];
+        }),
+      );
+      const stranded = store
+        .listAgents()
+        .flatMap((a) => {
+          const n = store.poll(a.id).length;
+          return n && !live.has(a.id) ? [`${n} for ${a.id}`] : [];
+        });
+      out.push(
+        stranded.length
+          ? {
+              name: "stranded-mail",
+              ok: false,
+              detail: `${stranded.join(", ")} — no session links to the recipient, wake can never deliver`,
+              fix: "beamline link --session <id> --to <agent> to rebind a session to the recipient",
+            }
+          : { name: "stranded-mail", ok: true, detail: "every recipient has a linked session" },
+      );
     } catch (e) {
       out.push({ name: "bus-selftest", ok: false, detail: String(e), fix: "`beamline reset --force`" });
     }
