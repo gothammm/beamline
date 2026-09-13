@@ -126,6 +126,27 @@ export function openStore(dbPath: string) {
     return r.changes > 0;
   }
 
+  // Reap agents no session links to: link-less, mail-less, and older than
+  // maxAgeMs (grace for just-registered rebind targets — `link --to` binds
+  // an existing agent by id). Pending directs block the purge (rebind or
+  // explicit unregister for those); broadcasts are shared history and never
+  // block. Returns purged ids.
+  // ponytail: per-agent mail probe is O(n) queries; agent counts stay tiny —
+  // a single NOT EXISTS join if that ever matters.
+  function purgeUnlinked(liveIds: Set<string>, now: number, maxAgeMs: number): string[] {
+    const rows = db.query("SELECT id, created_at FROM agents").all() as { id: string; created_at: number }[];
+    const hasMail = db.query("SELECT 1 FROM messages WHERE to_id = ? LIMIT 1");
+    const purged: string[] = [];
+    for (const r of rows) {
+      if (liveIds.has(r.id)) continue;
+      if (now - r.created_at <= maxAgeMs) continue;
+      if (hasMail.get(r.id)) continue;
+      unregister(r.id);
+      purged.push(r.id);
+    }
+    return purged;
+  }
+
   // Full bus reset: agents, messages, cursors. Hooks and configs survive —
   // no re-init needed after. CLI-only by design (unauthenticated bus).
   function reset(): { agents: number; messages: number } {
@@ -135,7 +156,7 @@ export function openStore(dbPath: string) {
     return { agents: a.changes, messages: m.changes };
   }
 
-  return { register, agent, listAgents, send, broadcast, log, poll, wait, ack, cursor, unregister, reset };
+  return { register, agent, listAgents, send, broadcast, log, poll, wait, ack, cursor, unregister, purgeUnlinked, reset };
 }
 
 export type Store = ReturnType<typeof openStore>;

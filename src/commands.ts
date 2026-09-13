@@ -153,11 +153,11 @@ export const COMMANDS: CommandDef[] = [
     options: [
       { long: "session", description: "Harness session id (or pipe hook JSON on stdin)" },
       { long: "agent", description: "Agent id to remove (alternative to --session)" },
-      { long: "sweep", type: "boolean", description: "Reap all stale session links (dead pid + old mtime)" },
+      { long: "sweep", type: "boolean", description: "Reap stale session links (dead pid + old mtime) and link-less agents (no pending mail + 60s grace)" },
     ],
     async run(values, _pos, ctx) {
       const store = useStore();
-      const { linkStale, readLink } = await import("./doctor.js");
+      const { linkStale, readLink, STALE_MS } = await import("./doctor.js");
       if (values.sweep === true) {
         const dir = join(beamDir(), "sessions");
         const swept: string[] = [];
@@ -173,7 +173,20 @@ export const COMMANDS: CommandDef[] = [
             swept.push(`${f}→${hit.link.id}`);
           }
         }
-        data(ctx, { ok: true, swept }, () => (swept.length ? `Swept ${swept.join(", ")}` : c("gray", "(nothing stale)")));
+        // Agents no session links to (rebind orphans, deleted link files,
+        // never-linked registrations) — kept only with pending mail or youth.
+        const live = new Set<string>();
+        if (existsSync(dir)) {
+          for (const f of (await import("node:fs")).readdirSync(dir)) {
+            const id = readLink(join(dir, f))?.id;
+            if (id) live.add(id);
+          }
+        }
+        const purged = store.purgeUnlinked(live, Date.now(), STALE_MS);
+        data(ctx, { ok: true, swept, purged }, () => {
+          const bits = [`${swept.length} stale link(s)`, `${purged.length} orphan agent(s)`];
+          return swept.length || purged.length ? `Swept ${bits.join(", ")}` : c("gray", "(nothing stale)");
+        });
         return;
       }
       const sid = asStr(values.session) || sessionIdFrom(await readStdin());
