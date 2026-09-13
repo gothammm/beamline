@@ -181,12 +181,16 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
       }
       const mail = JSON.parse(run("poll", ["--agent", agent]) || "[]");
       if (!mail.length) return;
-      const max = Math.max(...mail.map((m) => m.seq));
+      // Cap the batch: ack only through the last SHOWN seq. Acking past
+      // undisplayed mail would silently drop it; the overflow drains on
+      // later ticks instead.
+      const batch = mail.slice(0, 20);
+      const max = Math.max(...batch.map((m) => m.seq));
       // Auto-inject path auto-acks on success — prompt must NOT ask for manual
       // ack (manual ack is only for mail fetched via beamline_wait/poll).
       await prompt(
         sessionID,
-        `You are ${agent} on the beamline bus. New mail (auto-acked through seq ${max} — do NOT call beamline_ack for this batch; use beamline_ack only for mail you fetch yourself via beamline_wait):\n${mail.slice(0, 20).map(mailLine).join("\n")}`,
+        `You are ${agent} on the beamline bus. New mail (auto-acked through seq ${max} — do NOT call beamline_ack for this batch; use beamline_ack only for mail you fetch yourself via beamline_wait):\n${batch.map(mailLine).join("\n")}`,
       );
       run("ack", ["--agent", agent, "--upto", String(max)]);
       log({ injected: mail.length, upto: max, sessionID, via });

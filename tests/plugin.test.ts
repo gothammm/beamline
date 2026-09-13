@@ -81,6 +81,37 @@ describe("beamline plugin wake", () => {
     expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
   });
 
+  test("burst over the batch cap drains across ticks with nothing lost", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const recv = JSON.parse(sh(["link", "--session", "sburst", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    const bodies = Array.from({ length: 25 }, (_, i) => `burst-${i}`);
+    for (const body of bodies) sh(["send", "--from", send.id, "--to", recv.id, "--body", body], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000"; // slow poller: explicit idle events drive each batch
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
+      directory: d,
+    });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "sburst" } } });
+    expect(prompts).toEqual([]); // pre-linked: no identity prompt
+    // First batch: capped at 20, overflow stays queued (would have been acked
+    // unseen before the cap fix).
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "sburst" } } });
+    const pending = JSON.parse(sh(["poll", "--agent", recv.id], d)).map((m: { body: string }) => m.body);
+    expect(pending).toEqual(bodies.slice(20));
+    expect(JSON.stringify(prompts[0])).toContain("burst-0");
+    expect(JSON.stringify(prompts[0])).not.toContain("burst-20");
+    // Next tick drains the rest; every body delivered exactly once overall.
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "sburst" } } });
+    expect(prompts.length).toBe(2);
+    const seen = prompts.flatMap((p) => bodies.filter((b) => JSON.stringify(p).includes(b)));
+    expect([...new Set(seen)].sort()).toEqual([...bodies].sort());
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
+  });
+
   test("auto-inject prompt says auto-acked, never asks for manual ack", async () => {
     const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
     const recv = JSON.parse(sh(["link", "--session", "s3", "--name", "Recv"], d));
