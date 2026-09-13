@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { openStore } from "./store.js";
+import { openStore, type Agent, type Store } from "./store.js";
 
 export interface Check {
   name: string;
@@ -78,7 +78,6 @@ export function pidState(pid: number): PidState {
 // Stale = certain-dead pid AND old mtime (both — guards pid reuse).
 // Legacy links (no pid) and unprobeable pids never auto-reap.
 export const STALE_MS = 60_000;
-
 export function linkStale(path: string, now = Date.now()): { link: Link; stale: boolean; reason: string } | null {
   let mtimeMs: number;
   try {
@@ -94,6 +93,69 @@ export function linkStale(path: string, now = Date.now()): { link: Link; stale: 
     return { link, stale: true, reason: `pid ${link.pid} dead + mtime stale` };
   }
   return { link, stale: false, reason: ps === "unknown" ? `pid ${link.pid} unprobeable — warn only` : `pid ${link.pid} alive` };
+}
+
+export type LinkFlag = "live" | "stale" | "legacy" | "none";
+
+export interface AgentRow extends Agent {
+  session: string | null;
+  link: LinkFlag;
+}
+
+// Every session link in a workspace, unreadable files skipped.
+export function sessionLinks(beamDir: string): { session: string; link: Link; stale: boolean }[] {
+  const out: { session: string; link: Link; stale: boolean }[] = [];
+  let files: string[];
+  try {
+    files = readdirSync(join(beamDir, "sessions"));
+  } catch {
+    return out;
+  }
+  for (const f of files) {
+    const hit = linkStale(join(beamDir, "sessions", f));
+    if (hit) out.push({ session: f, link: hit.link, stale: hit.stale });
+  }
+  return out;
+}
+
+// Agents joined with link state: which session (if any) binds them and
+// whether that session is demonstrably alive. lastActive breaks ties
+// between duplicate codenames.
+export function agentRows(store: Store, beamDir: string): AgentRow[] {
+  const byAgent = new Map<string, { session: string; stale: boolean; legacy: boolean }>();
+  for (const { session, link, stale } of sessionLinks(beamDir)) {
+    if (!byAgent.has(link.id)) {
+      byAgent.set(link.id, { session, stale, legacy: link.pid === undefined });
+    }
+  }
+  return store.listAgents().map((a) => {
+    const hit = byAgent.get(a.id);
+    const link: LinkFlag = !hit ? "none" : hit.stale ? "stale" : hit.legacy ? "legacy" : "live";
+    return { ...a, session: hit?.session ?? null, link };
+  });
+}
+
+// Id-or-name resolution with liveness routing. Exact id always wins
+// (back-compat). A codename resolving to exactly one agent routes;
+// several → the single live one wins; genuinely ambiguous (or unknown)
+// throws an error the caller surfaces verbatim — it names the candidates
+// so the sender retries with an exact id instead of guessing.
+export function resolveRecipient(store: Store, beamDir: string, ref: string): Agent {
+  const found = store.resolveRef(ref);
+  if (!found) throw new Error(`unknown recipient "${ref}" — no agent with that id or name`);
+  if ("agent" in found) return found.agent; // exact id, or a codename with one match
+  const candidates = found.candidates;
+  const live = new Set(agentRows(store, beamDir).filter((r) => r.link === "live").map((r) => r.id));
+  const liveMatches = candidates.filter((c) => live.has(c.id));
+  if (liveMatches.length === 1) return liveMatches[0];
+  const rows = agentRows(store, beamDir);
+  const detail = candidates
+    .map((c) => {
+      const r = rows.find((x) => x.id === c.id);
+      return `${c.id} (${r?.link ?? "none"}${r?.session ? `, session ${r.session}` : ""}${c.lastActive ? `, last active ${new Date(c.lastActive).toISOString()}` : ", never talked"})`;
+    })
+    .join("; ");
+  throw new Error(`ambiguous recipient "${ref}" — ${candidates.length} matches: ${detail}. Retry with the exact agent id`);
 }
 
 function readJson(path: string): unknown | null {

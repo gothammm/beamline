@@ -234,20 +234,25 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "send",
     description: "Send a direct message to one agent by id.",
-    examples: ['beamline send --from apollo-1a2b --to astra-368e --body "go"'],
+    examples: ['beamline send --from apollo-1a2b --to astra-368e --body "go"', 'beamline send --from apollo-1a2b --to Astra --body "go"'],
     options: [
       { long: "from", required: true, description: "Sender agent id" },
-      { long: "to", required: true, description: "Recipient agent id" },
+      { long: "to", required: true, description: "Recipient agent id or codename (unique live match wins)" },
       { long: "body", required: true, description: "Message text" },
       { long: "thread", description: "Optional thread id" },
     ],
-    run(values, _pos, ctx) {
+    async run(values, _pos, ctx) {
       need(values, ["from", "to", "body"], ctx);
       try {
-        const m = useStore().send(values.from as string, values.to as string, values.body as string, asStr(values.thread));
-        data(ctx, m, () => `Sent to ${c("bold", m.to_id ?? "")} ${c("gray", `[seq=${m.seq}]`)}`);
+        const { resolveRecipient } = await import("./doctor.js");
+        const store = useStore();
+        // Sender first (own identity before routing), same message as ever.
+        if (!store.agent(values.from as string)) throw new Error(`unknown sender: ${values.from}`);
+        const to = resolveRecipient(store, beamDir(), values.to as string);
+        const m = store.send(values.from as string, to.id, values.body as string, asStr(values.thread));
+        data(ctx, m, () => `Sent to ${c("bold", to.id)}${to.id !== values.to ? ` (${to.name})` : ""} ${c("gray", `[seq=${m.seq}]`)}`);
       } catch (e) {
-        crash(ctx, e, "verify ids with 'beamline agents'");
+        crash(ctx, e, "verify ids with 'beamline agents --active'");
       }
     },
   },
@@ -343,8 +348,11 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "agents",
     description: "List all agents registered on this workspace bus.",
-    examples: ["beamline agents", "beamline agents --stale"],
-    options: [{ long: "stale", type: "boolean", description: "List stale session links instead (dead pid + old mtime)" }],
+    examples: ["beamline agents", "beamline agents --active", "beamline agents --stale"],
+    options: [
+      { long: "active", type: "boolean", description: "Only agents with a live session link" },
+      { long: "stale", type: "boolean", description: "List stale session links instead (dead pid + old mtime)" },
+    ],
     async run(values, _pos, ctx) {
       if (values.stale === true) {
         const { linkStale } = await import("./doctor.js");
@@ -359,8 +367,18 @@ export const COMMANDS: CommandDef[] = [
         data(ctx, rows, () => (rows.length ? rows.map((r) => `${c("bold", r.session)}→${r.agent}  ${c("gray", r.reason)}`).join("\n") : c("gray", "(nothing stale)")));
         return;
       }
-      const list = useStore().listAgents();
-      data(ctx, list, () => (list.length ? list.map((a) => `${c("bold", a.id)}  ${a.name}`).join("\n") : c("gray", "(no agents — beamline register)")));
+      const { agentRows } = await import("./doctor.js");
+      const ago = (t: number | null) => {
+        if (!t) return "never";
+        const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
+      };
+      const rows = agentRows(useStore(), beamDir()).filter((r) => values.active !== true || r.link === "live");
+      data(ctx, rows, () =>
+        rows.length
+          ? rows.map((r) => `${c("bold", r.id)}  ${r.name}  [${r.link}]${r.session ? `  ${r.session}` : ""}  ${c("gray", ago(r.lastActive))}`).join("\n")
+          : c("gray", "(no agents — beamline register)"),
+      );
     },
   },
   {

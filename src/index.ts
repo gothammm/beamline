@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { openStore } from "./store.js";
+import { agentRows, resolveRecipient } from "./doctor.js";
 import pkg from "../package.json";
 
 export async function runServer() {
@@ -20,12 +21,12 @@ server.registerTool("beamline_register", {
 }, ({ name }) => text(store.register(name)));
 
 server.registerTool("beamline_send", {
-  description: "Send a direct message to one agent by id. Wakes the peer (costs peer tokens) — FYI without reply goes to beamline_log. No auth — workspace-local bus, from_id is asserted not proven.",
+  description: "Send a direct message to one agent by id (or unique codename — the single live match wins; ambiguous names error with candidates so you retry with an exact id). Wakes the peer (costs peer tokens) — FYI without reply goes to beamline_log. No auth — workspace-local bus, from_id is asserted not proven.",
   inputSchema: {
-    from_id: z.string(), to_id: z.string(), body: z.string(),
+    from_id: z.string(), to_id: z.string().describe("Recipient agent id or codename"), body: z.string(),
     thread_id: z.string().optional(),
   },
-}, ({ from_id, to_id, body, thread_id }) => text(store.send(from_id, to_id, body, thread_id)));
+}, ({ from_id, to_id, body, thread_id }) => text(store.send(from_id, resolveRecipient(store, dir, to_id).id, body, thread_id)));
 
 server.registerTool("beamline_broadcast", {
   description: "Send a message to every agent on this workspace bus. No auth — workspace-local bus, from_id is asserted not proven.",
@@ -64,9 +65,9 @@ server.registerTool("beamline_ack", {
 });
 
 server.registerTool("beamline_list_agents", {
-  description: "List all agents registered on this workspace bus.",
+  description: "List all agents registered on this workspace bus. Each row carries its link flag (live = bound to a running session, stale/legacy/none otherwise), bound session, and lastActive timestamp — use the live row to disambiguate duplicate codenames.",
   inputSchema: {},
-}, () => text(store.listAgents()));
+}, () => text(agentRows(store, dir)));
 
 server.registerTool("beamline_unregister", {
   description: "Remove an agent from this workspace bus (session end / stale harness cleanup). Idempotent.",

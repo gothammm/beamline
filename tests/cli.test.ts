@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -76,7 +76,7 @@ describe("cli surface", () => {
     const d = tmp();
     run(["register", "--name", "Solo"], d);
     const agents = JSON.parse(run(["agents"], d).out);
-    expect(agents[0]).toEqual({ id: expect.stringMatching(/^solo-/), name: "Solo" });
+    expect(agents[0]).toEqual({ id: expect.stringMatching(/^solo-/), name: "Solo", lastActive: null, session: null, link: "none" });
   });
 
   test("-C targets another workspace", () => {
@@ -132,6 +132,49 @@ describe("cli surface", () => {
     const swept = JSON.parse(run(["unlink", "--sweep"], d).out);
     expect(swept.swept.join(",")).toContain("dead");
     expect(JSON.parse(run(["agents"], d).out)).toEqual([]);
+  });
+
+  test("agents flags link state; --active filters to live", () => {
+    const d = tmp();
+    const live = JSON.parse(run(["link", "--session", "s-live", "--name", "Live"], d).out);
+    // Live pid: rewrite the link with our own (alive) test-process pid.
+    writeFileSync(join(d, ".beamline", "sessions", "s-live"), JSON.stringify({ id: live.id, pid: process.pid, updated: Date.now() }));
+    const dead = JSON.parse(run(["link", "--session", "s-dead", "--name", "Dead"], d).out);
+    const p = join(d, ".beamline", "sessions", "s-dead");
+    writeFileSync(p, JSON.stringify({ id: dead.id, pid: 99999999, updated: 0 }));
+    utimesSync(p, new Date(0), new Date(0)); // mtime stale + pid dead
+    const lone = JSON.parse(run(["register", "--name", "Lone"], d).out);
+    const rows = JSON.parse(run(["agents"], d).out);
+    const byId = Object.fromEntries(rows.map((r: { id: string }) => [r.id, r])) as Record<string, { link: string; session: string | null }>;
+    expect(byId[live.id].link).toBe("live");
+    expect(byId[live.id].session).toBe("s-live");
+    expect(byId[dead.id].link).toBe("stale");
+    expect(byId[lone.id].link).toBe("none");
+    expect(JSON.parse(run(["agents", "--active"], d).out).map((r: { id: string }) => r.id)).toEqual([live.id]);
+  });
+
+  test("send routes by codename; ambiguous family errors with candidates", () => {
+    const d = tmp();
+    const sender = JSON.parse(run(["register", "--name", "Sender"], d).out);
+    const luna1 = JSON.parse(run(["register", "--name", "Luna"], d).out);
+    const luna2 = JSON.parse(run(["register", "--name", "Luna"], d).out); // uniquified: Luna-xxxx
+    expect(luna2.name.startsWith("Luna-")).toBe(true);
+    // No live links: family is ambiguous — error names both, exit 1.
+    const amb = run(["send", "--from", sender.id, "--to", "luna", "--body", "hi"], d);
+    expect(amb.code).toBe(1);
+    expect(amb.err).toContain("ambiguous");
+    expect(amb.err).toContain(luna1.id);
+    expect(amb.err).toContain(luna2.id);
+    // Bind one live session: the live Luna wins without asking.
+    mkdirSync(join(d, ".beamline", "sessions"), { recursive: true });
+    writeFileSync(join(d, ".beamline", "sessions", "s-luna"), JSON.stringify({ id: luna2.id, pid: process.pid, updated: Date.now() }));
+    const m = JSON.parse(run(["send", "--from", sender.id, "--to", "Luna", "--body", "hi"], d).out);
+    expect(m.to_id).toBe(luna2.id);
+    expect(JSON.parse(run(["poll", "--agent", luna2.id], d).out).map((x: { body: string }) => x.body)).toEqual(["hi"]);
+    // Unknown names stay actionable.
+    const unk = run(["send", "--from", sender.id, "--to", "Nobody", "--body", "hi"], d);
+    expect(unk.code).toBe(1);
+    expect(unk.err).toContain('unknown recipient "Nobody"');
   });
 
   test("unlink --sweep purges link-less agents with no pending mail", () => {
