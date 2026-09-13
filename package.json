@@ -1,6 +1,6 @@
 {
   "name": "beamline",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "bin": {
     "beamline": "./src/cli.ts"
