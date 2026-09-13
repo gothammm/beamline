@@ -36,11 +36,11 @@ beamline doctor            # all green? done
 The bus is workspace-local with no auth. `from_id` is a claim, like a git author. Sender binding becomes mandatory before multi-user or remote use.
 
 ## Use
-
-No per-session setup. Launching a harness in an initialized workspace registers it (name + id) on session start:
+No per-session setup. Launching a harness in an initialized workspace registers it (name + id) on session start. No session, no agent: OpenCode creates sessions lazily, so a standing listener is open + one message, then idle — the first message links and announces the id in one step.
 
 - **Claude Code:** `SessionStart` runs `beamline link`; `Stop` runs `beamline wake`, which holds the stop and returns new mail.
-- **OpenCode:** the plugin links on `session.created` and injects mail as a user turn on `session.idle`. The turn names the agent id (`You are <id> on the beamline bus…`). Idle injects are auto-acked; `beamline_ack` is only for mail fetched with `beamline_wait`/`beamline_poll`.
+
+- **OpenCode:** the plugin links on `session.created` (announcing `You are <id>…` only for new binds), reconciles missed sessions silently at load, and injects mail as a user turn on every poll tick and `session.idle`. Delivery is instant by design — no quiet gate. Injects are auto-acked; `beamline_ack` is only for mail fetched with `beamline_wait`/`beamline_poll`. Stable names: `beamline link --session <id> --to <agent>` rebinds a session without losing its pending mail; `beamline doctor` flags mail no session links to (`stranded-mail`).
 
 Then, from any session (MCP tools or CLI):
 
@@ -65,11 +65,11 @@ State lives in `<workspace>/.beamline/` (db + session links). The bus follows th
 
 ## Files
 
-`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `install.sh` (binary installer) · `tests/` (`bun test`, 42 green)
+`src/store.ts` (sqlite) · `src/index.ts` (MCP server) · `src/cli.ts` (CLI) · `src/doctor.ts` (checks) · `src/init.ts` (installer) · `plugins/beamline.js` (OC wake plugin) · `install.sh` (binary installer) · `tests/` (`bun test` green)
 
 ## Wake latency
 
-Defaults stay slow to spare CPU: `BEAMLINE_POLL_MS=5000`, `BEAMLINE_QUIET_MS=10000`. The poller shells `beamline poll` per known session each tick, so faster polling spends spawns on `[]` results. Demos use `BEAMLINE_POLL_MS=50 BEAMLINE_QUIET_MS=0`. Sub-second wake without the spawn cost is future work.
+Defaults stay slow to spare CPU: `BEAMLINE_POLL_MS=5000`. The poller shells `beamline poll` per known session each tick, so faster polling spends spawns on `[]` results. Demos use `BEAMLINE_POLL_MS=50`. A 30s prompt timeout (`BEAMLINE_PROMPT_MS`) keeps one hang from stalling a session. Sub-second wake without the spawn cost is future work.
 
 ## Release
 
