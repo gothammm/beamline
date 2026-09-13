@@ -11,6 +11,13 @@ BINDIR="${BINDIR:-$HOME/.local/bin}"
 step() { printf '[→] %s\n' "$1"; }
 ok() { printf '[✓] %s\n' "$1"; }
 die() { printf '[✗] %s (fix: %s)\n' "$1" "$2" >&2; exit 1; }
+# A running `beamline mcp` keeps the OLD binary image in memory: connected
+# harnesses still see the previous version until they restart.
+mcp_note() {
+  if command -v pgrep >/dev/null && pgrep -f "beamline mcp" >/dev/null 2>&1; then
+    printf '[→] %s\n' "beamline mcp is running — restart opencode to load $1"
+  fi
+}
 
 command -v curl >/dev/null || die "curl not found" "install curl, then re-run this script"
 command -v uname >/dev/null || die "uname not found" "run on Linux, macOS, or Git Bash"
@@ -44,6 +51,7 @@ if [ -x "$BINDIR/beamline" ]; then
   HAVE="$("$BINDIR/beamline" --version 2>/dev/null || true)"
   if [ -n "$HAVE" ] && [ "$HAVE" = "$WANT_NUM" ]; then
     ok "already current — beamline $HAVE"
+    mcp_note "$HAVE"
     exit 0
   fi
 fi
@@ -88,3 +96,4 @@ case ":$PATH:" in
   *":$BINDIR:"*) ok "on PATH — $BINDIR" ;;
   *) printf '[✗] %s (fix: %s)\n' "$BINDIR not on PATH" "export PATH=\"\$PATH:$BINDIR\"" >&2 ;;
 esac
+mcp_note "$VER"
