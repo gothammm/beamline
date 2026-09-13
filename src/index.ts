@@ -15,7 +15,7 @@ const server = new McpServer({ name: "beamline", version: (pkg as { version?: st
 const text = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v) }] });
 
 server.registerTool("beamline_register", {
-  description: "Join this workspace bus. Returns {id, name}. Save the id — pass it as agent_id/from_id everywhere. If this session is already linked (BEAMLINE_AGENT env or .beamline/sessions/<session-id> exists), reuse that id instead of registering again.",
+  description: "Join this workspace bus. Returns {id, name}. Save the id — pass it as agent_id/from_id everywhere. Your session was told its linked id at creation: reuse that id instead of registering again (BEAMLINE_AGENT env or .beamline/sessions/<session-id> if unsure).",
   inputSchema: { name: z.string().optional().describe("Preferred codename; random one assigned if omitted/taken") },
 }, ({ name }) => text(store.register(name)));
 

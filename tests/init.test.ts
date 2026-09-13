@@ -73,6 +73,26 @@ describe("link + doctor matrix", () => {
     expect(b.linked).toBe("existing");
   });
 
+  test("link --to binds an existing agent, keeps its mail deliverable", () => {
+    const d = tmp();
+    const stable = JSON.parse(sh(["register", "--name", "Muse"], d).out);
+    const sender = JSON.parse(sh(["register", "--name", "Send"], d).out);
+    sh(["send", "--from", sender.id, "--to", stable.id, "--body", "waiting"], d);
+    const bound = JSON.parse(sh(["link", "--session", "s1", "--to", stable.id], d).out);
+    expect(bound.id).toBe(stable.id);
+    expect(bound.linked).toBe("rebound");
+    const again = JSON.parse(sh(["link", "--session", "s1", "--to", stable.id], d).out);
+    expect(again.linked).toBe("existing");
+    // Pending mail survives the rebind (unlike the unlink/re-link path).
+    expect(JSON.parse(sh(["poll", "--agent", stable.id], d).out).map((m: { body: string }) => m.body)).toEqual(["waiting"]);
+  });
+
+  test("link --to rejects unknown agents and --name combos", () => {
+    const d = tmp();
+    expect(sh(["link", "--session", "s1", "--to", "ghost-0000"], d).code).toBe(1);
+    expect(sh(["link", "--session", "s1", "--to", "ghost-0000", "--name", "X"], d).code).toBe(1);
+  });
+
   test("doctor fail set on bare workspace, green after merges", async () => {
     const d = tmp();
     const cwd = process.cwd();
@@ -91,6 +111,24 @@ describe("link + doctor matrix", () => {
       expect(failed2).not.toContain("claude-hooks");
       expect(failed2).not.toContain("opencode-mcp");
       expect(failed2).not.toContain("opencode-plugin");
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  test("doctor flags mail for agents no session links to", async () => {
+    const d = tmp();
+    const reg = JSON.parse(sh(["register", "--name", "Strand"], d).out);
+    sh(["send", "--from", reg.id, "--to", reg.id, "--body", "nobody polls me"], d);
+    const cwd = process.cwd();
+    process.chdir(d);
+    try {
+      const bad = (await collectChecks(false)).find((c) => c.name === "stranded-mail")!;
+      expect(bad.ok).toBe(false);
+      expect(bad.detail).toContain(reg.id);
+      sh(["link", "--session", "s9", "--to", reg.id], d);
+      const good = (await collectChecks(false)).find((c) => c.name === "stranded-mail")!;
+      expect(good.ok).toBe(true);
     } finally {
       process.chdir(cwd);
     }

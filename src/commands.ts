@@ -109,16 +109,28 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "link",
     description: "Link a harness session to a beamline agent (SessionStart hook). Idempotent.",
-    examples: ["echo '{\"session_id\":\"abc\"}' | beamline link", "beamline link --session abc", "beamline link --session abc --name Apollo"],
+    examples: ["echo '{\"session_id\":\"abc\"}' | beamline link", "beamline link --session abc", "beamline link --session abc --name Apollo", "beamline link --session abc --to apollo-1a2b"],
     options: [
       { long: "session", description: "Harness session id (or pipe hook JSON on stdin)" },
       { long: "name", description: "Preferred codename (or $BEAMLINE_NAME; random if omitted/taken)" },
+      { long: "to", description: "Bind this session to an existing agent id (rebinds; keeps its pending mail deliverable)" },
     ],
     async run(values, _pos, ctx) {
       const store = useStore();
       const { readLink } = await import("./doctor.js");
       const sid = asStr(values.session) || sessionIdFrom(await readStdin());
       if (!sid) fail(ctx, "no session id", "pipe hook JSON on stdin or pass --session <id>");
+      const target = asStr(values.to);
+      if (target && asStr(values.name)) fail(ctx, "--to and --name conflict", "pass only one");
+      if (target) {
+        const a = store.agent(target);
+        if (!a) fail(ctx, `unknown agent: ${target}`, "verify ids with 'beamline agents'");
+        const f = join(beamDir(), "sessions", sid);
+        const prev = readLink(f)?.id;
+        writeLink(f, target);
+        data(ctx, { ...a, session: sid, linked: prev === target ? "existing" : "rebound" }, () => `Linked ${c("green", a.name)} (${c("bold", a.id)}) to ${sid}`);
+        return;
+      }
       mkdirSync(join(beamDir(), "sessions"), { recursive: true });
       const f = join(beamDir(), "sessions", sid);
       if (existsSync(f)) {
