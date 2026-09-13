@@ -24,6 +24,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function openStore(dbPath: string) {
   const db = new Database(dbPath, { create: true });
+  // Contended writers (plugin tick + MCP server + CLI) wait instead of
+  // failing with SQLITE_BUSY — a failed ack is a silent redelivery-or-stall.
+  db.exec(`PRAGMA busy_timeout = 5000`);
   db.exec(`CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS messages (
@@ -120,9 +123,12 @@ export function openStore(dbPath: string) {
 
   function poll(agent_id: string, after_seq?: number, includeQuiet = false): Message[] {
     const after = after_seq ?? cursor(agent_id);
+    // Own broadcasts are excluded: the sender already knows what it said —
+    // echoing them back reads as duplicate/confusing mail. Self-sent DIRECTS
+    // still deliver (self-messaging is a legitimate pattern).
     return db.query(
-      "SELECT seq, from_id, to_id, thread_id, body FROM messages WHERE seq > ? AND (to_id = ? OR to_id IS NULL) AND (quiet = 0 OR ? = 1) ORDER BY seq",
-    ).all(after, agent_id, includeQuiet ? 1 : 0) as Message[];
+      "SELECT seq, from_id, to_id, thread_id, body FROM messages WHERE seq > ? AND (to_id = ? OR to_id IS NULL) AND NOT (to_id IS NULL AND from_id = ?) AND (quiet = 0 OR ? = 1) ORDER BY seq",
+    ).all(after, agent_id, agent_id, includeQuiet ? 1 : 0) as Message[];
   }
 
   // ponytail: sleep-poll loop, ceiling is ~250ms latency + one wake per agent;

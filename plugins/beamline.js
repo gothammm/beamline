@@ -9,8 +9,12 @@
 // - session.deleted: unlink + remove the agent from the bus.
 // - every tick + every session.idle: poll beamline for this session's agent
 //   and inject mail as a prompt. Instant delivery by design — no quiet gate.
-//   A prompt timeout (PROMPT_MS, default 30000) keeps one hang from stalling
-//   a session forever; failed injects stay unacked for the next tick.
+//   Delivery has two modes: free sessions get a waking turn; sessions that
+//   recently timed out a turn are busy, so ticks append context without one
+//   (noReply — measured 9ms vs 30s hangs; read on the next step, in order).
+//   session.idle, or the wake-retry expiry (WAKE_RETRY_MS, default 300000),
+//   flips back to wake mode. A prompt is delivered only when its ack is
+//   confirmed (retried, idempotent) — never silently dropped, never replayed.
 // - first load reconciles: sessions born while this copy was absent join the
 //   known set silently (no prompt — never interrupt a working session).
 //   Reconcile never links by itself: history holds dead sessions, and linking
@@ -29,8 +33,10 @@ import { join } from "node:path";
 const sh = (args, cwd) => {
   // Never throws: a missing CLI (GUI PATH without ~/.local/bin) or empty
   // output degrades to "" and every caller treats "" as no-result.
+  // Live env (not the startup snapshot): in-process overrides such as
+  // BEAMLINE_* set by the harness must reach CLI children.
   try {
-    const proc = Bun.spawnSync(args, { cwd });
+    const proc = Bun.spawnSync(args, { cwd, env: { ...process.env } });
     return new TextDecoder().decode(proc.stdout);
   } catch {
     return "";
@@ -74,9 +80,10 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
   };
   const POLL_MS = Math.max(250, num(process.env.BEAMLINE_POLL_MS, 5000));
   const PROMPT_MS = Math.max(50, num(process.env.BEAMLINE_PROMPT_MS, 30000));
+  const WAKE_RETRY_MS = Math.max(1000, num(process.env.BEAMLINE_WAKE_RETRY_MS, 300000));
   const LOCK_MS = 60000;
 
-  const prompt = (sessionID, text) => {
+  const prompt = (sessionID, text, noReply) => {
     let timer;
     const timeout = new Promise((_, rej) => {
       timer = setTimeout(() => rej(new Error(`prompt timeout after ${PROMPT_MS}ms`)), PROMPT_MS);
@@ -85,7 +92,7 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
     return Promise.race([
       client.session.prompt({
         path: { id: sessionID },
-        body: { parts: [{ type: "text", text }] },
+        body: { noReply: noReply === true, parts: [{ type: "text", text }] },
       }),
       timeout,
     ]).finally(() => clearTimeout(timer));
@@ -183,6 +190,27 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
   // Memory-only: a restart may duplicate one batch — duplicates beat loss.
   const attempted = new Map();
 
+  // Append mode per session: expiry timestamp, absent = wake mode. A
+  // session that timed out a reply-prompt is busy — another reply would
+  // hang another 30s, so ticks append context without a turn instead
+  // (measured 9ms vs 30s timeouts; the session reads it on its next step,
+  // in order, no duplicate). session.idle, or the wake-retry expiry,
+  // proves the session can take a turn again and flips back to wake mode.
+  const appendUntil = new Map();
+
+  // Confirmed ack: a prompt is not delivered until the cursor advances —
+  // a silently failed ack replays ancient mail on later ticks (cursor never
+  // moved) or stalls delivery behind the attempted marker. Ack is
+  // max()-idempotent, so retry it rather than ever re-prompting for it.
+  const ackUpTo = (agent, max) => {
+    for (let i = 0; i < 3; i++) {
+      try {
+        if (JSON.parse(run("ack", ["--agent", agent, "--upto", String(max)]) || "{}").ok === true) return true;
+      } catch {}
+    }
+    return false;
+  };
+
   const checkSession = async (sessionID, via) => {
     if (inflight.has(sessionID)) return;
     if (!sessionLike(sessionID)) return;
@@ -209,23 +237,36 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
       // later ticks instead.
       const batch = mail.slice(0, 20);
       const max = Math.max(...batch.map((m) => m.seq));
+      // Delivery mode (see appendUntil): busy sessions get a context append,
+      // free sessions a waking turn.
+      const now = Date.now();
+      if ((appendUntil.get(sessionID) ?? 0) <= now) appendUntil.delete(sessionID);
+      const useNoReply = appendUntil.has(sessionID);
       // Auto-inject path auto-acks on success — prompt must NOT ask for manual
       // ack (manual ack is only for mail fetched via beamline_wait/poll).
       try {
         await prompt(
           sessionID,
           `You are ${agent} on the beamline bus. New mail (auto-acked through seq ${max} — do NOT call beamline_ack for this batch; use beamline_ack only for mail you fetch yourself via beamline_wait):\n${batch.map(mailLine).join("\n")}`,
+          useNoReply,
         );
       } catch (e) {
         // Timeout ≈ server accepted the prompt and it may still land:
-        // record the attempt so later ticks don't re-inject a duplicate.
+        // record the attempt so later ticks don't re-inject a duplicate,
+        // and switch to append mode so the next attempt can't hang again.
         // Fast failures (≈ rejected, never delivered) stay retryable.
-        if (String(e?.message ?? e).includes("prompt timeout")) attempted.set(sessionID, max);
+        if (String(e?.message ?? e).includes("prompt timeout")) {
+          attempted.set(sessionID, max);
+          appendUntil.set(sessionID, Date.now() + WAKE_RETRY_MS);
+        }
         log({ error: String(e?.message ?? e), sessionID, upto: max, via });
         return; // mail retained
       }
+      if (!ackUpTo(agent, max)) {
+        log({ error: "ack failed", sessionID, upto: max, via });
+        return; // unmarked: next tick re-prompts promptly (bounded dup, no stall)
+      }
       attempted.set(sessionID, max);
-      run("ack", ["--agent", agent, "--upto", String(max)]);
       log({ injected: mail.length, upto: max, sessionID, via });
     } finally {
       if (locked) dropLock(sessionID);
@@ -298,6 +339,7 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
           run("unlink", ["--session", String(sessionID)]);
           known.delete(String(sessionID));
           attempted.delete(String(sessionID));
+          appendUntil.delete(String(sessionID));
           dropLock(String(sessionID));
           dropLock(String(sessionID), "link");
           log({ unlinked: sessionID });
@@ -306,6 +348,9 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
         if (event.type !== "session.idle") return;
         const sessionID = sidOf(event);
         if (!sessionID) return;
+        // Idle proves the session can take a turn: leave append mode first
+        // so this delivery wakes normally.
+        appendUntil.delete(String(sessionID));
         await checkSession(sessionID, "idle");
       } catch (e) {
         log({ error: String(e?.message ?? e) });
