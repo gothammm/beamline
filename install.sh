@@ -26,19 +26,49 @@ case "$OS-$ARCH" in
 esac
 ok "platform — $OS-$ARCH → $ASSET"
 
+# Resolve the desired version so repeat runs are instant and a stale
+# download is caught, never silently kept. Tags are vX.Y.Z on the server.
 if [ "$TAG" = "latest" ]; then
-  URL="$BASE/latest/download/$ASSET"
+  LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$BASE/latest")" \
+    || die "could not resolve latest release" "check your network and re-run"
+  WANT="${LATEST_URL##*/}"
 else
-  URL="$BASE/download/$TAG/$ASSET"
+  case "$TAG" in
+    v*) WANT="$TAG" ;;
+    *) WANT="v$TAG" ;;
+  esac
+fi
+WANT_NUM="${WANT#v}"
+
+if [ -x "$BINDIR/beamline" ]; then
+  HAVE="$("$BINDIR/beamline" --version 2>/dev/null || true)"
+  if [ -n "$HAVE" ] && [ "$HAVE" = "$WANT_NUM" ]; then
+    ok "already current — beamline $HAVE"
+    exit 0
+  fi
+fi
+
+if [ "$TAG" = "latest" ]; then
+  GZ_URL="$BASE/latest/download/$ASSET.gz"
+  RAW_URL="$BASE/latest/download/$ASSET"
+else
+  GZ_URL="$BASE/download/$WANT/$ASSET.gz"
+  RAW_URL="$BASE/download/$WANT/$ASSET"
 fi
 
 mkdir -p "$BINDIR"
 TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT INT TERM
-step "downloading $URL"
-curl -fSL --progress-bar -o "$TMP" "$URL" || die "download failed" "check your network and re-run"
+trap 'rm -f "$TMP" "$TMP.gz"' EXIT INT TERM
+step "downloading beamline $WANT"
+GOT=""
+if command -v gzip >/dev/null && curl -fSL --progress-bar -o "$TMP.gz" "$GZ_URL" 2>/dev/null; then
+  gzip -dc "$TMP.gz" >"$TMP" || die "decompress failed" "re-run this script"
+  GOT="gz"
+elif curl -fSL --progress-bar -o "$TMP" "$RAW_URL" || die "download failed" "check your network and re-run"; then
+  GOT="raw"
+fi
 SIZE=$(wc -c <"$TMP" | tr -d ' ')
-ok "downloaded — $SIZE bytes"
+ok "downloaded — $SIZE bytes ($GOT)"
 mv "$TMP" "$BINDIR/beamline"
 chmod +x "$BINDIR/beamline"
 ok "installed — $BINDIR/beamline"
@@ -51,6 +81,7 @@ if [ "$OS" = "Darwin" ]; then
 fi
 
 VER="$("$BINDIR/beamline" --version 2>/dev/null)" || die "installed binary won't run" "re-run this script"
+[ "$VER" = "$WANT_NUM" ] || die "installed $VER, wanted $WANT_NUM" "re-run this script"
 ok "verified — beamline $VER"
 
 case ":$PATH:" in
