@@ -24,8 +24,14 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 
 const sh = (args, cwd) => {
-  const proc = Bun.spawnSync(args, { cwd });
-  return new TextDecoder().decode(proc.stdout);
+  // Never throws: a missing CLI (GUI PATH without ~/.local/bin) or empty
+  // output degrades to "" and every caller treats "" as no-result.
+  try {
+    const proc = Bun.spawnSync(args, { cwd });
+    return new TextDecoder().decode(proc.stdout);
+  } catch {
+    return "";
+  }
 };
 
 export const BeamlinePlugin = async ({ client, directory, project }) => {
@@ -166,24 +172,29 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
 
   // Silent reconcile: link sessions born while this copy was absent (missed
   // created). Scoped to this project only — never pull another workspace's
-  // sessions into this bus.
-  try {
-    const res = await client.session.list?.();
-    const list = Array.isArray(res) ? res : (res?.data ?? []);
-    for (const s of list) {
-      const sid = s?.id ? String(s.id) : "";
-      if (!sid) continue;
-      if (project?.id && s?.projectID && s.projectID !== project.id) continue;
-      if (s?.directory && s.directory !== directory) continue;
-      known.add(sid);
-      const link = join(directory, ".beamline", "sessions", sid);
-      if (existsSync(link)) continue;
-      const out = JSON.parse(run("link", ["--session", sid]) || "{}");
-      if (out?.id) log({ linked: out.id, sessionID: sid, via: "reconcile" });
+  // sessions into this bus. Runs in the background AFTER hooks return, so a
+  // slow/hanging session list or CLI can never stall plugin load (opencode
+  // awaits plugin init — blocking here is a silent no-launch).
+  const reconcile = async () => {
+    try {
+      const res = await client.session?.list?.();
+      const list = Array.isArray(res) ? res : (res?.data ?? []);
+      for (const s of list) {
+        const sid = s?.id ? String(s.id) : "";
+        if (!sid) continue;
+        if (project?.id && s?.projectID && s.projectID !== project.id) continue;
+        if (s?.directory && s.directory !== directory) continue;
+        known.add(sid);
+        const link = join(directory, ".beamline", "sessions", sid);
+        if (existsSync(link)) continue;
+        const out = JSON.parse(run("link", ["--session", sid]) || "{}");
+        if (out?.id) log({ linked: out.id, sessionID: sid, via: "reconcile" });
+      }
+    } catch (e) {
+      log({ error: String(e?.message ?? e) });
     }
-  } catch (e) {
-    log({ error: String(e?.message ?? e) });
-  }
+  };
+  void reconcile();
 
   return {
     event: async ({ event }) => {
