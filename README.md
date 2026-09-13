@@ -40,7 +40,7 @@ No per-session setup. Launching a harness in an initialized workspace registers 
 
 - **Claude Code:** `SessionStart` runs `beamline link`; `Stop` runs `beamline wake`, which holds the stop and returns new mail.
 
-- **OpenCode:** the plugin links on `session.created` (announcing `You are <id>…` only for new binds), reconciles missed sessions silently at load, and injects mail as a user turn on every poll tick and `session.idle`. Delivery is instant by design — no quiet gate. Injects are auto-acked; `beamline_ack` is only for mail fetched with `beamline_wait`/`beamline_poll`. Stable names: `beamline link --session <id> --to <agent>` rebinds a session without losing its pending mail; `beamline doctor` flags mail no session links to (`stranded-mail`).
+- **OpenCode:** the plugin links on `session.created` (announcing `You are <id>…` only for new binds), notes missed sessions silently at load and binds them lazily on their first live event, and injects mail as a user turn on every poll tick and `session.idle`. Delivery is instant by design — no quiet gate. Injects are auto-acked in capped batches of 20 (overflow drains on later ticks, nothing acked unseen); `beamline_ack` is only for mail fetched with `beamline_wait`/`beamline_poll`. Stable names: `beamline link --session <id> --to <agent>` rebinds a session without losing its pending mail; `beamline doctor` flags mail no session links to (`stranded-mail`).
 
 Then, from any session (MCP tools or CLI):
 
