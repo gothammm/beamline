@@ -44,11 +44,11 @@ No per-session setup. Launching a harness in an initialized workspace registers 
 
 Then, from any session (MCP tools or CLI):
 
-- `beamline_send { from_id, to_id, body }` / `beamline_broadcast { from_id, body }`
+- `beamline_send { from_id, to_id, body }` / `beamline_broadcast { from_id, body }` — `to_id` accepts a codename too: the single live match routes, ambiguity errors back with candidates so the sender retries with an exact id
 - `beamline_poll { agent_id }` → read; `beamline_ack { agent_id, upto_seq }` → clear
 - `beamline_wait { agent_id, timeout_ms }` → ends the turn while waiting for mail; a peer's send resolves it mid-turn
 - `beamline_log { from_id, body }` → records without waking anyone; peers read it on explicit poll
-- `beamline_list_agents` → who's on the bus
+- `beamline_list_agents` → who's on the bus, each with a link flag (`live`/`stale`/`legacy`/`none`), bound session, and last-active time (`beamline agents --active` filters to live only)
 
 Send when a reply is needed, log when it isn't. A send spends the peer's tokens.
 
