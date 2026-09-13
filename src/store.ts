@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 export interface Agent {
   id: string;
   name: string;
+  lastActive: number | null; // max message created_at involving this agent; null = never talked
 }
 export interface Message {
   seq: number;
@@ -48,7 +49,7 @@ export function openStore(dbPath: string) {
       .run(id, name, Date.now());
     // New agents start past historic broadcasts — no replay of mail from before they joined.
     db.query("INSERT OR IGNORE INTO cursors (agent_id, upto_seq) VALUES (?, (SELECT COALESCE(MAX(seq), 0) FROM messages))").run(id);
-    return { id, name };
+    return { id, name, lastActive: null };
   }
 
   function agent(id: string): Agent | null {
@@ -56,7 +57,32 @@ export function openStore(dbPath: string) {
   }
 
   function listAgents(): Agent[] {
-    return db.query("SELECT id, name FROM agents ORDER BY created_at").all() as Agent[];
+    return db.query(
+      `SELECT a.id, a.name, MAX(m.created_at) AS lastActive FROM agents a
+       LEFT JOIN messages m ON m.from_id = a.id OR m.to_id = a.id
+       GROUP BY a.id ORDER BY a.created_at`,
+    ).all() as Agent[];
+  }
+
+  // Name-or-id resolution. Exact id always wins (back-compat); otherwise a
+  // case-insensitive codename match. Unique → agent; several → candidates
+  // for the caller to disambiguate by liveness; none → null.
+  // Family matching: register uniquifies taken names as base-xxxx, so
+  // "luna" also matches "luna-3fa1" — the live-member rule below picks
+  // the right Luna instead of erroring on the suffix.
+  // ponytail: full-table scan, one query — agent counts stay tiny.
+  function resolveRef(ref: string): { agent: Agent } | { candidates: Agent[] } | null {
+    const all = listAgents();
+    const byId = all.find((a) => a.id === ref);
+    if (byId) return { agent: byId };
+    const lower = ref.toLowerCase();
+    const matches = all.filter((a) => {
+      const n = a.name.toLowerCase();
+      return n === lower || n.startsWith(`${lower}-`);
+    });
+    if (matches.length === 1) return { agent: matches[0] };
+    if (matches.length > 1) return { candidates: matches };
+    return null;
   }
 
   function send(from_id: string, to_id: string, body: string, thread_id?: string): Message {
@@ -156,7 +182,7 @@ export function openStore(dbPath: string) {
     return { agents: a.changes, messages: m.changes };
   }
 
-  return { register, agent, listAgents, send, broadcast, log, poll, wait, ack, cursor, unregister, purgeUnlinked, reset };
+  return { register, agent, listAgents, resolveRef, send, broadcast, log, poll, wait, ack, cursor, unregister, purgeUnlinked, reset };
 }
 
 export type Store = ReturnType<typeof openStore>;

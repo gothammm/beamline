@@ -54,6 +54,15 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
     return p.sessionID ?? p.sessionId ?? p.session_id ?? p.id;
   };
 
+  // Session-id gate: opencode session ids look like ses_<hash>. Bare
+  // properties.id from unrelated events (provider names like "openai",
+  // command names like "command") must never become sessions — the lazy
+  // path would register a real agent for each, with the live server pid,
+  // so nothing could ever reap them. Link files (hook-created, any
+  // harness) always pass: they are proof of a real session.
+  const SES_RE = /^ses_[A-Za-z0-9]+$/;
+  const sessionLike = (sid) => SES_RE.test(String(sid)) || existsSync(join(directory, ".beamline", "sessions", String(sid)));
+
   // ponytail: in-process guard only; cross-copy single-flight is the lockdir
   // below (global+project copies, or two OC servers, share one workspace bus).
   const inflight = new Set();
@@ -141,8 +150,11 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
   // Agents are ONLY created here, and only for sessions that demonstrably
   // emit events (created/idle/...) — never for entries that merely exist in
   // session history. That keeps dead history from mass-registering orphans.
+  // Non-session ids (provider/command names from unrelated events) are
+  // refused outright — see sessionLike.
   const ensureLinked = (sessionID) => {
     const sid = String(sessionID);
+    if (!sessionLike(sid)) return null;
     const link = join(directory, ".beamline", "sessions", sid);
     if (existsSync(link)) {
       const id = agentOf(sid);
@@ -163,8 +175,17 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
     }
   };
 
+  // Highest seq ever ATTEMPTED per session (prompt called, outcome
+  // unknown). A prompt timeout can't cancel the server-side prompt — it
+  // usually still lands — so retrying the same batch next tick injects a
+  // visible duplicate. While nothing newer arrived, skip re-prompting;
+  // when fresh mail arrives the whole pending range goes out once.
+  // Memory-only: a restart may duplicate one batch — duplicates beat loss.
+  const attempted = new Map();
+
   const checkSession = async (sessionID, via) => {
     if (inflight.has(sessionID)) return;
+    if (!sessionLike(sessionID)) return;
     inflight.add(sessionID);
     let locked = false;
     try {
@@ -181,6 +202,8 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
       }
       const mail = JSON.parse(run("poll", ["--agent", agent]) || "[]");
       if (!mail.length) return;
+      const fresh = mail.filter((m) => m.seq > (attempted.get(sessionID) ?? -1));
+      if (!fresh.length) return; // attempted already, nothing new — no duplicate
       // Cap the batch: ack only through the last SHOWN seq. Acking past
       // undisplayed mail would silently drop it; the overflow drains on
       // later ticks instead.
@@ -188,10 +211,20 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
       const max = Math.max(...batch.map((m) => m.seq));
       // Auto-inject path auto-acks on success — prompt must NOT ask for manual
       // ack (manual ack is only for mail fetched via beamline_wait/poll).
-      await prompt(
-        sessionID,
-        `You are ${agent} on the beamline bus. New mail (auto-acked through seq ${max} — do NOT call beamline_ack for this batch; use beamline_ack only for mail you fetch yourself via beamline_wait):\n${batch.map(mailLine).join("\n")}`,
-      );
+      try {
+        await prompt(
+          sessionID,
+          `You are ${agent} on the beamline bus. New mail (auto-acked through seq ${max} — do NOT call beamline_ack for this batch; use beamline_ack only for mail you fetch yourself via beamline_wait):\n${batch.map(mailLine).join("\n")}`,
+        );
+      } catch (e) {
+        // Timeout ≈ server accepted the prompt and it may still land:
+        // record the attempt so later ticks don't re-inject a duplicate.
+        // Fast failures (≈ rejected, never delivered) stay retryable.
+        if (String(e?.message ?? e).includes("prompt timeout")) attempted.set(sessionID, max);
+        log({ error: String(e?.message ?? e), sessionID, upto: max, via });
+        return; // mail retained
+      }
+      attempted.set(sessionID, max);
       run("ack", ["--agent", agent, "--upto", String(max)]);
       log({ injected: mail.length, upto: max, sessionID, via });
     } finally {
@@ -242,7 +275,7 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
     event: async ({ event }) => {
       try {
         const seen = sidOf(event);
-        if (seen) known.add(String(seen));
+        if (seen && sessionLike(String(seen))) known.add(String(seen));
         if (event.type === "session.created") {
           const sessionID = sidOf(event);
           if (!sessionID) return;
@@ -264,7 +297,9 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
           if (!sessionID) return;
           run("unlink", ["--session", String(sessionID)]);
           known.delete(String(sessionID));
+          attempted.delete(String(sessionID));
           dropLock(String(sessionID));
+          dropLock(String(sessionID), "link");
           log({ unlinked: sessionID });
           return;
         }

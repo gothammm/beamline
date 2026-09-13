@@ -176,12 +176,12 @@ describe("beamline plugin wake", () => {
       client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
       directory: d,
     });
-    await plugin.event({ event: { type: "session.created", properties: { sessionID: "su" } } });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_su1" } } });
     await sleep(300);
     expect(prompts.length).toBe(1);
     const text = JSON.stringify(prompts[0]);
     expect(text).toContain("never beamline_register again");
-    expect(text).toContain("su");
+    expect(text).toContain("ses_su1");
   });
 
   test("restart heals: link file with zero events still injects", async () => {
@@ -285,8 +285,8 @@ describe("beamline plugin wake", () => {
       client: { session: { prompt: async (p: unknown) => void prompts.push(p) } },
       directory: d,
     });
-    await plugin.event({ event: { type: "session.created", properties: { sessionID: "sx" } } });
-    await plugin.event({ event: { type: "session.created", properties: { sessionID: "sx" } } });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_sx1" } } });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_sx1" } } });
     await sleep(300);
     expect(prompts.length).toBe(1);
     expect(JSON.stringify(prompts[0])).toContain("never beamline_register again");
@@ -302,8 +302,8 @@ describe("beamline plugin wake", () => {
         session: {
           prompt: async (p: unknown) => void prompts.push(p),
           list: async () => [
-            { id: "mine", projectID: "p1", directory: d },
-            { id: "bare", directory: d },
+            { id: "ses_mine1", projectID: "p1", directory: d },
+            { id: "ses_bare1", directory: d },
             { id: "foreign", projectID: "other", directory: "/elsewhere" },
           ],
         },
@@ -317,15 +317,15 @@ describe("beamline plugin wake", () => {
     // History alone links nothing and registers no agents: a live session
     // proves itself by emitting events, and links lazily on the first one.
     expect(JSON.parse(sh(["agents"], d))).toEqual([]);
-    expect(existsSync(join(d, ".beamline", "sessions", "mine"))).toBe(false);
-    expect(existsSync(join(d, ".beamline", "sessions", "bare"))).toBe(false);
+    expect(existsSync(join(d, ".beamline", "sessions", "ses_mine1"))).toBe(false);
+    expect(existsSync(join(d, ".beamline", "sessions", "ses_bare1"))).toBe(false);
     expect(existsSync(join(d, ".beamline", "sessions", "foreign"))).toBe(false);
     expect(prompts).toEqual([]);
     // First live event for a listed session binds it silently (no identity
     // prompt — the session is already working, never interrupt it).
-    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "mine" } } });
-    expect(existsSync(join(d, ".beamline", "sessions", "mine"))).toBe(true);
-    expect(existsSync(join(d, ".beamline", "sessions", "bare"))).toBe(false);
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_mine1" } } });
+    expect(existsSync(join(d, ".beamline", "sessions", "ses_mine1"))).toBe(true);
+    expect(existsSync(join(d, ".beamline", "sessions", "ses_bare1"))).toBe(false);
     expect(JSON.parse(sh(["agents"], d)).length).toBe(1);
     expect(prompts).toEqual([]);
   });
@@ -356,12 +356,73 @@ describe("beamline plugin wake", () => {
     const pa = await mk(a);
     const pb = await mk(b);
     await Promise.all([
-      pa.event({ event: { type: "session.created", properties: { sessionID: "race" } } }),
-      pb.event({ event: { type: "session.created", properties: { sessionID: "race" } } }),
+      pa.event({ event: { type: "session.created", properties: { sessionID: "ses_race1" } } }),
+      pb.event({ event: { type: "session.created", properties: { sessionID: "ses_race1" } } }),
     ]);
     await sleep(300);
     expect(JSON.parse(sh(["agents"], d)).length).toBe(1);
     expect(a.length + b.length).toBe(1);
+  });
+
+  test("non-session event ids never link or register (provider-name junk repro)", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "50";
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void prompts.push(p) } },
+      directory: d,
+    });
+    // Bare properties.id from unrelated events (providers, commands, …).
+    await plugin.event({ event: { type: "session.created", properties: { id: "openai" } } });
+    await plugin.event({ event: { type: "message.updated", properties: { id: "groq" } } });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "command" } } });
+    await sleep(600);
+    expect(JSON.parse(sh(["agents"], d))).toEqual([]);
+    expect(existsSync(join(d, ".beamline", "sessions"))).toBe(false);
+    expect(prompts).toEqual([]);
+  });
+
+  test("timed-out prompt is not re-injected until newer mail arrives", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const recv = JSON.parse(sh(["link", "--session", "ses_timeout1", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "first"], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000"; // slow poller: explicit idle events only
+    process.env.BEAMLINE_PROMPT_MS = "200";
+    let hang = true;
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: {
+        session: {
+          prompt: async (p: unknown) => {
+            if (hang) return new Promise(() => {}); // server takes it, never answers in time
+            prompts.push(p);
+          },
+        },
+      },
+      directory: d,
+    });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_timeout1" } } });
+    await sleep(500); // timeout fired, attempt recorded, mail retained
+    expect(prompts).toEqual([]);
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d)).map((m: { body: string }) => m.body)).toEqual(["first"]);
+    hang = false;
+    // Nothing new: must NOT re-prompt (the timed-out attempt usually lands
+    // late on its own — retrying injects a visible duplicate).
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_timeout1" } } });
+    await sleep(300);
+    expect(prompts).toEqual([]);
+    // Fresh mail: whole pending range goes out exactly once, then acked.
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "second"], d);
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_timeout1" } } });
+    expect(prompts.length).toBe(1);
+    const text = JSON.stringify(prompts[0]);
+    expect(text).toContain("first");
+    expect(text).toContain("second");
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
   });
 
   test("init never blocks on a hanging session list (silent no-launch repro)", async () => {
@@ -388,8 +449,7 @@ describe("beamline plugin wake", () => {
     expect(typeof plugin.event).toBe("function");
   });
 
-  test("missing CLI never throws — events degrade to logged no-ops", async () => {
-    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+  test("missing CLI never throws — events degrade to logged no-ops", async () => {    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
     // Bogus BEAMLINE_HOME: `bun <missing>/src/cli.ts` exits nonzero with no
     // stdout — same degraded path as a `beamline` binary missing from GUI PATH
     // (Bun resolves PATH at startup, so blanking PATH mid-process can't
