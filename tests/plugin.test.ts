@@ -280,9 +280,54 @@ describe("beamline plugin wake", () => {
       directory: d,
       project: { id: "p1" },
     });
+    // Reconcile runs in the background (never blocks plugin load) — wait for it.
+    for (let i = 0; i < 50 && !existsSync(join(d, ".beamline", "sessions", "mine")); i++) await sleep(100);
     expect(existsSync(join(d, ".beamline", "sessions", "mine"))).toBe(true);
     expect(existsSync(join(d, ".beamline", "sessions", "bare"))).toBe(true);
     expect(existsSync(join(d, ".beamline", "sessions", "foreign"))).toBe(false);
+    expect(prompts).toEqual([]);
+  });
+
+  test("init never blocks on a hanging session list (silent no-launch repro)", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000";
+    const plugin = await Promise.race([
+      BeamlinePlugin({
+        client: { session: { prompt: async () => {}, list: () => new Promise(() => {}) } },
+        directory: d,
+      }),
+      sleep(2000).then(() => {
+        throw new Error("plugin init blocked startup");
+      }),
+    ]);
+    expect(typeof plugin.event).toBe("function");
+  });
+
+  test("init tolerates a client with no session object", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000";
+    const plugin = await BeamlinePlugin({ client: {}, directory: d });
+    expect(typeof plugin.event).toBe("function");
+  });
+
+  test("missing CLI never throws — events degrade to logged no-ops", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    // Bogus BEAMLINE_HOME: `bun <missing>/src/cli.ts` exits nonzero with no
+    // stdout — same degraded path as a `beamline` binary missing from GUI PATH
+    // (Bun resolves PATH at startup, so blanking PATH mid-process can't
+    // simulate it; both funnel through sh() returning "").
+    process.env.BEAMLINE_HOME = join(tmpdir(), "bl-no-such-dir");
+    process.env.BEAMLINE_POLL_MS = "60000";
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void prompts.push(p) } },
+      directory: d,
+    });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "sx" } } });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "sx" } } });
+    await sleep(300);
     expect(prompts).toEqual([]);
   });
 });
