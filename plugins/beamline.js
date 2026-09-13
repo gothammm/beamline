@@ -11,8 +11,11 @@
 //   and inject mail as a prompt. Instant delivery by design — no quiet gate.
 //   A prompt timeout (PROMPT_MS, default 30000) keeps one hang from stalling
 //   a session forever; failed injects stay unacked for the next tick.
-// - first load reconciles: sessions born while this copy was absent get linked
-//   silently (no prompt — never interrupt a working session).
+// - first load reconciles: sessions born while this copy was absent join the
+//   known set silently (no prompt — never interrupt a working session).
+//   Reconcile never links by itself: history holds dead sessions, and linking
+//   each would mass-register orphan agents. A live-but-unlinked session links
+//   lazily on its next event, then delivers in the same tick.
 // Identity resolves via .beamline/sessions/<session-id>; $BEAMLINE_AGENT overrides.
 // Each tick shells `beamline poll` per known session (POLL_MS, default 5000,
 // floor 250) — spawn cost ~1 bun/session/tick mostly returning []. For demos
@@ -82,7 +85,7 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
   // ponytail: mkdir-atomic lockdir single-flights delivery across plugin
   // copies; stale break on dead owner pid or age — ceiling is a stuck live
   // owner blocking one session up to LOCK_MS before the breaker takes over.
-  const lockDir = (sid) => join(directory, ".beamline", `inject-${String(sid)}.lock`);
+  const lockDir = (tag, sid) => join(directory, ".beamline", `${tag}-${String(sid)}.lock`);
   const ownerDead = (pid) => {
     try {
       process.kill(pid, 0);
@@ -91,28 +94,28 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
       return e?.code === "ESRCH";
     }
   };
-  const takeLock = (sid) => {
+  const takeLock = (sid, tag = "inject") => {
     try {
       mkdirSync(join(directory, ".beamline"), { recursive: true });
-      mkdirSync(lockDir(sid));
+      mkdirSync(lockDir(tag, sid));
     } catch {
       try {
-        const [pidRaw, atRaw] = readFileSync(join(lockDir(sid), "meta"), "utf8").split(" ");
+        const [pidRaw, atRaw] = readFileSync(join(lockDir(tag, sid), "meta"), "utf8").split(" ");
         if (!ownerDead(Number(pidRaw)) && Date.now() - Number(atRaw) < LOCK_MS) return false;
-        rmSync(lockDir(sid), { recursive: true, force: true });
-        mkdirSync(lockDir(sid));
+        rmSync(lockDir(tag, sid), { recursive: true, force: true });
+        mkdirSync(lockDir(tag, sid));
       } catch {
         return false;
       }
     }
     try {
-      writeFileSync(join(lockDir(sid), "meta"), `${process.pid} ${Date.now()}`);
+      writeFileSync(join(lockDir(tag, sid), "meta"), `${process.pid} ${Date.now()}`);
     } catch {}
     return true;
   };
-  const dropLock = (sid) => {
+  const dropLock = (sid, tag = "inject") => {
     try {
-      rmSync(lockDir(sid), { recursive: true, force: true });
+      rmSync(lockDir(tag, sid), { recursive: true, force: true });
     } catch {}
   };
 
@@ -131,6 +134,35 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
 
   const mailLine = (m) => `📨 from ${m.from_id}${m.thread_id ? ` @${m.thread_id}` : ""}: ${m.body}  [seq=${m.seq}]`;
 
+  // Link a session to its agent, idempotent. Single-flighted across plugin
+  // copies with its own lock so two copies racing the same new session
+  // register exactly one agent. Returns {id, linked} or null when the CLI
+  // is unreachable (caller degrades to a no-op, retried next tick/event).
+  // Agents are ONLY created here, and only for sessions that demonstrably
+  // emit events (created/idle/...) — never for entries that merely exist in
+  // session history. That keeps dead history from mass-registering orphans.
+  const ensureLinked = (sessionID) => {
+    const sid = String(sessionID);
+    const link = join(directory, ".beamline", "sessions", sid);
+    if (existsSync(link)) {
+      const id = agentOf(sid);
+      if (id) return { id, linked: "existing" };
+    }
+    if (!takeLock(sid, "link")) return null;
+    try {
+      if (existsSync(link)) {
+        const id = agentOf(sid);
+        if (id) return { id, linked: "existing" };
+      }
+      const out = JSON.parse(run("link", ["--session", sid]) || "{}");
+      return out?.id ? { id: out.id, linked: out.linked ?? "new" } : null;
+    } catch {
+      return null;
+    } finally {
+      dropLock(sid, "link");
+    }
+  };
+
   const checkSession = async (sessionID, via) => {
     if (inflight.has(sessionID)) return;
     inflight.add(sessionID);
@@ -138,8 +170,15 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
     try {
       if (!takeLock(sessionID)) return;
       locked = true;
-      const agent = agentOf(sessionID);
-      if (!agent) return;
+      let agent = agentOf(sessionID);
+      if (!agent) {
+        // Lazy link: the session is demonstrably live (it's emitting events)
+        // but missed created — bind it silently, then deliver in this tick.
+        const bound = ensureLinked(sessionID);
+        if (!bound) return;
+        agent = bound.id;
+        log({ linked: agent, sessionID, via: `lazy-${via}` });
+      }
       const mail = JSON.parse(run("poll", ["--agent", agent]) || "[]");
       if (!mail.length) return;
       const max = Math.max(...mail.map((m) => m.seq));
@@ -170,11 +209,14 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
   }, POLL_MS);
   if (timer.unref) timer.unref();
 
-  // Silent reconcile: link sessions born while this copy was absent (missed
-  // created). Scoped to this project only — never pull another workspace's
-  // sessions into this bus. Runs in the background AFTER hooks return, so a
-  // slow/hanging session list or CLI can never stall plugin load (opencode
-  // awaits plugin init — blocking here is a silent no-launch).
+  // Silent reconcile: sessions born while this copy was absent (missed
+  // created) join `known` so live ones link lazily on their next event.
+  // Reconcile NEVER links by itself: session history includes long-dead
+  // sessions, and linking each would mass-register orphan agents no wake
+  // path can deliver to. Scoped to this project only — never pull another
+  // workspace's sessions into this bus. Runs in the background AFTER hooks
+  // return, so a slow/hanging session list or CLI can never stall plugin
+  // load (opencode awaits plugin init — blocking here is a silent no-launch).
   const reconcile = async () => {
     try {
       const res = await client.session?.list?.();
@@ -185,10 +227,6 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
         if (project?.id && s?.projectID && s.projectID !== project.id) continue;
         if (s?.directory && s.directory !== directory) continue;
         known.add(sid);
-        const link = join(directory, ".beamline", "sessions", sid);
-        if (existsSync(link)) continue;
-        const out = JSON.parse(run("link", ["--session", sid]) || "{}");
-        if (out?.id) log({ linked: out.id, sessionID: sid, via: "reconcile" });
       }
     } catch (e) {
       log({ error: String(e?.message ?? e) });
@@ -204,12 +242,12 @@ export const BeamlinePlugin = async ({ client, directory, project }) => {
         if (event.type === "session.created") {
           const sessionID = sidOf(event);
           if (!sessionID) return;
-          const res = JSON.parse(run("link", ["--session", String(sessionID)]) || "{}");
-          log({ linked: res.id, sessionID });
+          const res = ensureLinked(sessionID);
+          log({ linked: res?.id, sessionID });
           // Identity in-band, announced once: MCP can't resolve the caller
           // server-side, so the session must be told its id or it registers
           // a duplicate that no wake path polls as.
-          if (res.id && res.linked === "new") {
+          if (res?.id && res.linked === "new") {
             await prompt(
               String(sessionID),
               `You are ${res.id} on the beamline bus (session ${sessionID}). Send, poll, wait, and ack with this id — reuse it, never beamline_register again. Peers reach you at this id.`,

@@ -266,7 +266,7 @@ describe("beamline plugin wake", () => {
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     process.env.BEAMLINE_POLL_MS = "60000";
     const prompts: unknown[] = [];
-    await BeamlinePlugin({
+    const plugin = await BeamlinePlugin({
       client: {
         session: {
           prompt: async (p: unknown) => void prompts.push(p),
@@ -280,12 +280,57 @@ describe("beamline plugin wake", () => {
       directory: d,
       project: { id: "p1" },
     });
-    // Reconcile runs in the background (never blocks plugin load) — wait for it.
-    for (let i = 0; i < 50 && !existsSync(join(d, ".beamline", "sessions", "mine")); i++) await sleep(100);
-    expect(existsSync(join(d, ".beamline", "sessions", "mine"))).toBe(true);
-    expect(existsSync(join(d, ".beamline", "sessions", "bare"))).toBe(true);
+    // Reconcile runs in the background (never blocks plugin load) and logs
+    // nothing on success — allow it to finish before asserting.
+    await sleep(500);
+    // History alone links nothing and registers no agents: a live session
+    // proves itself by emitting events, and links lazily on the first one.
+    expect(JSON.parse(sh(["agents"], d))).toEqual([]);
+    expect(existsSync(join(d, ".beamline", "sessions", "mine"))).toBe(false);
+    expect(existsSync(join(d, ".beamline", "sessions", "bare"))).toBe(false);
     expect(existsSync(join(d, ".beamline", "sessions", "foreign"))).toBe(false);
     expect(prompts).toEqual([]);
+    // First live event for a listed session binds it silently (no identity
+    // prompt — the session is already working, never interrupt it).
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "mine" } } });
+    expect(existsSync(join(d, ".beamline", "sessions", "mine"))).toBe(true);
+    expect(existsSync(join(d, ".beamline", "sessions", "bare"))).toBe(false);
+    expect(JSON.parse(sh(["agents"], d)).length).toBe(1);
+    expect(prompts).toEqual([]);
+  });
+
+  test("history burst registers zero agents until a session goes live", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000";
+    const history = Array.from({ length: 25 }, (_, i) => ({ id: `dead-${i}`, directory: d }));
+    const prompts: unknown[] = [];
+    await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void prompts.push(p), list: async () => history } },
+      directory: d,
+    });
+    await sleep(500);
+    expect(JSON.parse(sh(["agents"], d))).toEqual([]);
+    expect(prompts).toEqual([]);
+  });
+
+  test("two copies racing one new session register a single agent", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000";
+    const a: unknown[] = [];
+    const b: unknown[] = [];
+    const mk = (s: unknown[]) =>
+      BeamlinePlugin({ client: { session: { prompt: async (p: unknown) => void s.push(p) } }, directory: d });
+    const pa = await mk(a);
+    const pb = await mk(b);
+    await Promise.all([
+      pa.event({ event: { type: "session.created", properties: { sessionID: "race" } } }),
+      pb.event({ event: { type: "session.created", properties: { sessionID: "race" } } }),
+    ]);
+    await sleep(300);
+    expect(JSON.parse(sh(["agents"], d)).length).toBe(1);
+    expect(a.length + b.length).toBe(1);
   });
 
   test("init never blocks on a hanging session list (silent no-launch repro)", async () => {
