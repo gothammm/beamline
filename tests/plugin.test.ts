@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BeamlinePlugin } from "../plugins/beamline.js";
@@ -27,14 +27,13 @@ describe("beamline plugin wake", () => {
 
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     process.env.BEAMLINE_POLL_MS = "50";
-    process.env.BEAMLINE_QUIET_MS = "0";
     const prompts: unknown[] = [];
     const plugin = await BeamlinePlugin({
       client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
       directory: d,
     });
     // Only a created event — never idle (parked at prompt). Poller must wake it.
-    // (Created also fires one identity prompt; the mail prompt is the 1 match.)
+    // (Already linked, so no identity prompt — just the mail prompt.)
     await plugin.event({ event: { type: "session.created", properties: { sessionID: "s1" } } });
     await sleep(1200);
     const found = prompts.filter((p) => JSON.stringify(p).includes("knock knock"));
@@ -49,7 +48,6 @@ describe("beamline plugin wake", () => {
 
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     process.env.BEAMLINE_POLL_MS = "50";
-    process.env.BEAMLINE_QUIET_MS = "0";
     const prompts: unknown[] = [];
     const plugin = await BeamlinePlugin({
       client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
@@ -57,9 +55,8 @@ describe("beamline plugin wake", () => {
     });
     await plugin.event({ event: { type: "session.created", properties: { sessionID: "s9" } } });
     await sleep(600);
-    // Only the created-time identity prompt; no mail prompt.
-    expect(prompts.length).toBe(1);
-    expect(JSON.stringify(prompts[0])).toContain("never beamline_register again");
+    // Already linked and no mail: total silence (identity fires only on new binds).
+    expect(prompts).toEqual([]);
   });
 
   test("batch injects all mail in one prompt, then acks to empty", async () => {
@@ -70,7 +67,6 @@ describe("beamline plugin wake", () => {
 
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     process.env.BEAMLINE_POLL_MS = "50";
-    process.env.BEAMLINE_QUIET_MS = "0";
     const prompts: unknown[] = [];
     const plugin = await BeamlinePlugin({
       client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
@@ -93,7 +89,6 @@ describe("beamline plugin wake", () => {
 
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     process.env.BEAMLINE_POLL_MS = "50";
-    process.env.BEAMLINE_QUIET_MS = "0";
     const prompts: unknown[] = [];
     const plugin = await BeamlinePlugin({
       client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
@@ -117,7 +112,6 @@ describe("beamline plugin wake", () => {
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     // Slow poller so only our explicit idle events drive injects.
     process.env.BEAMLINE_POLL_MS = "60000";
-    process.env.BEAMLINE_QUIET_MS = "0";
     let fail = true;
     const prompts: unknown[] = [];
     const plugin = await BeamlinePlugin({
@@ -146,7 +140,6 @@ describe("beamline plugin wake", () => {
     const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     process.env.BEAMLINE_POLL_MS = "60000"; // slow poller: only the created prompt fires
-    process.env.BEAMLINE_QUIET_MS = "0";
     const prompts: unknown[] = [];
     const plugin = await BeamlinePlugin({
       client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
@@ -168,7 +161,6 @@ describe("beamline plugin wake", () => {
 
     process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
     process.env.BEAMLINE_POLL_MS = "50";
-    process.env.BEAMLINE_QUIET_MS = "0";
     const prompts: unknown[] = [];
     // No events fired at all: simulates a server restart wiping known.
     await BeamlinePlugin({
@@ -179,5 +171,118 @@ describe("beamline plugin wake", () => {
     expect(prompts.length).toBe(1);
     expect(JSON.stringify(prompts[0])).toContain("after restart");
     expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
+  });
+
+  test("delivery is instant despite session activity — no quiet gate", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const recv = JSON.parse(sh(["link", "--session", "sa", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "urgent"], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "50";
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: { session: { prompt: async (a: unknown) => void prompts.push(a) } },
+      directory: d,
+    });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "sa" } } });
+    // Constant activity while the poller runs — delivery must not wait for quiet.
+    for (let i = 0; i < 5; i++) {
+      await plugin.event({ event: { type: "message.updated", properties: { sessionID: "sa" } } });
+      await sleep(100);
+    }
+    await sleep(400);
+    const found = prompts.filter((p) => JSON.stringify(p).includes("urgent"));
+    expect(found.length).toBe(1);
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
+  });
+
+  test("hanging prompt times out — mail retained, retried, never wedged", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const recv = JSON.parse(sh(["link", "--session", "sh", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "stuck"], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "50";
+    process.env.BEAMLINE_PROMPT_MS = "200";
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: { session: { prompt: () => new Promise(() => {}) } },
+      directory: d,
+    });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "sh" } } });
+    await sleep(700);
+    expect(prompts).toEqual([]);
+    // Not acked: still waiting for the next tick.
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d)).map((m: { body: string }) => m.body)).toEqual(["stuck"]);
+    expect(readFileSync(join(d, ".beamline", "oc-events.log"), "utf8")).toContain("prompt timeout");
+  });
+
+  test("two copies single-flight: one prompt total, acked once", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const recv = JSON.parse(sh(["link", "--session", "sd", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "once only"], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "50";
+    const a: unknown[] = [];
+    const b: unknown[] = [];
+    // No events: both pollers find the session via rescan, like global+project copies.
+    await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void a.push(p) } },
+      directory: d,
+    });
+    await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void b.push(p) } },
+      directory: d,
+    });
+    await sleep(900);
+    expect(a.length + b.length).toBe(1);
+    expect(JSON.stringify([...a, ...b][0])).toContain("once only");
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
+  });
+
+  test("created announces identity only on new binds", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000"; // slow poller: only created prompts fire
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void prompts.push(p) } },
+      directory: d,
+    });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "sx" } } });
+    await plugin.event({ event: { type: "session.created", properties: { sessionID: "sx" } } });
+    await sleep(300);
+    expect(prompts.length).toBe(1);
+    expect(JSON.stringify(prompts[0])).toContain("never beamline_register again");
+  });
+
+  test("load reconciles missed sessions silently, scoped to this project", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000";
+    const prompts: unknown[] = [];
+    await BeamlinePlugin({
+      client: {
+        session: {
+          prompt: async (p: unknown) => void prompts.push(p),
+          list: async () => [
+            { id: "mine", projectID: "p1", directory: d },
+            { id: "bare", directory: d },
+            { id: "foreign", projectID: "other", directory: "/elsewhere" },
+          ],
+        },
+      },
+      directory: d,
+      project: { id: "p1" },
+    });
+    expect(existsSync(join(d, ".beamline", "sessions", "mine"))).toBe(true);
+    expect(existsSync(join(d, ".beamline", "sessions", "bare"))).toBe(true);
+    expect(existsSync(join(d, ".beamline", "sessions", "foreign"))).toBe(false);
+    expect(prompts).toEqual([]);
   });
 });
