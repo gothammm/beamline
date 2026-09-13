@@ -6,7 +6,8 @@ import { openStore } from "../src/store";
 
 // ponytail: one round-trip file is the whole suite; add cases only when a regression bites.
 describe("beamline round-trip", () => {
-  const store = openStore(join(mkdtempSync(join(tmpdir(), "bl-")), "t.db"));
+  const dir = mkdtempSync(join(tmpdir(), "bl-"));
+  const store = openStore(join(dir, "t.db"));
   const apollo = store.register("Apollo");
   const astra = store.register("Astra");
 
@@ -21,9 +22,20 @@ describe("beamline round-trip", () => {
     expect(store.poll(apollo.id)).toEqual([]);
   });
 
-  test("broadcast reaches everyone", () => {
+  test("broadcast reaches everyone except the sender's own echo", () => {
     store.broadcast(apollo.id, "standup");
-    expect(store.poll(apollo.id).map((m) => m.body)).toEqual(["standup"]);
+    expect(store.poll(apollo.id).map((m) => m.body)).toEqual([]);
+    expect(store.poll(astra.id).map((m) => m.body)).toContain("standup");
+  });
+
+  test("shared db file serves two handles without busy errors", () => {
+    const db2 = openStore(join(dir, "t.db"));
+    const senders = Array.from({ length: 10 }, (_, i) => store.register(`Hammer${i}`));
+    for (const s of senders) {
+      db2.send(s.id, apollo.id, "hammer");
+      store.ack(s.id, 1);
+    }
+    expect(store.poll(apollo.id).map((m) => m.body).filter((b) => b === "hammer").length).toBe(10);
   });
 
   test("ack advances cursor", () => {

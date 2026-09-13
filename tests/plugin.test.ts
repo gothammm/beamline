@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BeamlinePlugin } from "../plugins/beamline.js";
@@ -423,6 +423,85 @@ describe("beamline plugin wake", () => {
     expect(text).toContain("first");
     expect(text).toContain("second");
     expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
+  });
+
+  test("busy session gets noReply appends; idle flips back to waking turns", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const recv = JSON.parse(sh(["link", "--session", "ses_append1", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "m1"], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "50"; // ticks drive append-mode delivery
+    process.env.BEAMLINE_PROMPT_MS = "200";
+    const calls: { noReply: boolean; text: string }[] = [];
+    let hang = true;
+    const plugin = await BeamlinePlugin({
+      client: {
+        session: {
+          prompt: async (a: { body: { noReply: boolean; parts: { text: string }[] } }) => {
+            if (hang) return new Promise(() => {});
+            calls.push({ noReply: a.body.noReply === true, text: a.body.parts.map((p) => p.text).join("\n") });
+          },
+        },
+      },
+      directory: d,
+    });
+    // Wake attempt hangs → timeout → append mode.
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_append1" } } });
+    await sleep(500);
+    hang = false;
+    // Fresh mail on a tick: context append, no turn, whole pending range.
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "m2"], d);
+    await sleep(600);
+    expect(calls.length).toBe(1);
+    expect(calls[0].noReply).toBe(true);
+    expect(calls[0].text).toContain("m1");
+    expect(calls[0].text).toContain("m2");
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
+    // Next idle proves turn-taking: back to a waking turn.
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "m3"], d);
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_append1" } } });
+    expect(calls.length).toBe(2);
+    expect(calls[1].noReply).toBe(false);
+    expect(calls[1].text).toContain("m3");
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
+  });
+
+  test("failed ack is retried, never masked — no ancient replay, no stall", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    // Fake CLI: delegates everything to the real one except ack, which fails.
+    const fakeHome = mkdtempSync(join(tmpdir(), "bl-fakehome-"));
+    const realCli = join(import.meta.dir, "..", "src", "cli.ts");
+    mkdirSync(join(fakeHome, "src"), { recursive: true });
+    // Real path interpolated: Bun children inherit the startup env snapshot,
+    // not in-process mutations, so the fake cannot rely on env passing.
+    writeFileSync(
+      join(fakeHome, "src", "cli.ts"),
+      `const args = process.argv.slice(2);\n` +
+        `if (args[0] === "ack") process.exit(1);\n` +
+        `const p = Bun.spawnSync(["bun", ${JSON.stringify(realCli)}, ...args], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });\n` +
+        `process.stdout.write(Buffer.from(p.stdout));\nprocess.exit(p.exitCode);\n`,
+    );
+    process.env.BEAMLINE_HOME = fakeHome;
+    process.env.BEAMLINE_POLL_MS = "60000"; // explicit idle events only
+    const recv = JSON.parse(sh(["link", "--session", "ses_ackfail1", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "keep me"], d);
+
+    const prompts: unknown[] = [];
+    const plugin = await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void prompts.push(p) } },
+      directory: d,
+    });
+    // Prompt succeeds but ack fails 3x: unmarked, so the next tick/idle
+    // re-prompts the SAME batch promptly (no skip, no ancient replay).
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_ackfail1" } } });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_ackfail1" } } });
+    expect(prompts.length).toBe(2);
+    expect(JSON.stringify(prompts[0])).toEqual(JSON.stringify(prompts[1]));
+    expect(JSON.parse(sh(["poll", "--agent", recv.id], d)).map((m: { body: string }) => m.body)).toEqual(["keep me"]);
+    expect(readFileSync(join(d, ".beamline", "oc-events.log"), "utf8")).toContain("ack failed");
   });
 
   test("init never blocks on a hanging session list (silent no-launch repro)", async () => {

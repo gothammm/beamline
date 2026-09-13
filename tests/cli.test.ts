@@ -213,9 +213,11 @@ describe("cli surface", () => {
   test("log hides from poll, shows with --include-quiet", () => {
     const d = tmp();
     const a = JSON.parse(run(["register", "--name", "Alf"], d).out);
+    const b = JSON.parse(run(["register", "--name", "Bob"], d).out);
     run(["log", "--from", a.id, "--body", "status"], d);
-    expect(JSON.parse(run(["poll", "--agent", a.id], d).out)).toEqual([]);
-    const rows = JSON.parse(run(["poll", "--agent", a.id, "--include-quiet"], d).out);
+    // Own broadcast logs are not echoed to the sender (it said it).
+    expect(JSON.parse(run(["poll", "--agent", a.id, "--include-quiet"], d).out)).toEqual([]);
+    const rows = JSON.parse(run(["poll", "--agent", b.id, "--include-quiet"], d).out);
     expect(rows.map((m: { body: string }) => m.body)).toContain("status");
   });
 

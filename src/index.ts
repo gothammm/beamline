@@ -43,12 +43,12 @@ server.registerTool("beamline_log", {
 }, ({ from_id, to_id, body, thread_id }) => text(store.log(from_id, body, to_id, thread_id)));
 
 server.registerTool("beamline_poll", {
-  description: "Fetch messages for agent_id after after_seq (defaults to last ack cursor). Does not mark read. Quiet log lines excluded unless include_quiet.",
+  description: "Fetch messages for agent_id after after_seq (defaults to last ack cursor). Does not mark read — the wake path will re-inject anything you don't ack, so pass after_seq from the last seq you processed and beamline_ack what you keep. Quiet log lines excluded unless include_quiet. Own broadcasts are excluded (you already know what you said).",
   inputSchema: { agent_id: z.string(), after_seq: z.number().optional(), include_quiet: z.boolean().optional() },
 }, ({ agent_id, after_seq, include_quiet }) => text(store.poll(agent_id, after_seq, include_quiet ?? false)));
 
 server.registerTool("beamline_wait", {
-  description: "Block until a message arrives for agent_id or timeout_ms elapses. End turns with this instead of stopping when expecting mail. Use YOUR linked agent id — never invent one.",
+  description: "Block until a message arrives for agent_id or timeout_ms elapses. Does not mark read — ack what you keep or the wake path re-injects it; pass after_seq from the last seq you processed to avoid re-reads. End turns with this instead of stopping when expecting mail. Use YOUR linked agent id — never invent one.",
   inputSchema: {
     agent_id: z.string(), after_seq: z.number().optional(),
     timeout_ms: z.number().optional().describe("Max wait, default 30000"),
