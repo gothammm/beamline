@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +132,24 @@ describe("cli surface", () => {
     const swept = JSON.parse(run(["unlink", "--sweep"], d).out);
     expect(swept.swept.join(",")).toContain("dead");
     expect(JSON.parse(run(["agents"], d).out)).toEqual([]);
+  });
+
+  test("unlink --sweep purges link-less agents with no pending mail", () => {
+    const d = tmp();
+    const orphan = JSON.parse(run(["register", "--name", "Orphan"], d).out);
+    const busy = JSON.parse(run(["register", "--name", "Busy"], d).out);
+    const fresh = JSON.parse(run(["register", "--name", "Fresh"], d).out);
+    run(["send", "--from", busy.id, "--to", busy.id, "--body", "keep me"], d);
+    // Age orphan + busy past the grace period; fresh stays young.
+    const db = new Database(join(d, ".beamline", "beamline.db"));
+    db.query("UPDATE agents SET created_at = 0 WHERE id = ?").run(orphan.id);
+    db.query("UPDATE agents SET created_at = 0 WHERE id = ?").run(busy.id);
+    db.close();
+    const swept = JSON.parse(run(["unlink", "--sweep"], d).out);
+    expect(swept.purged).toEqual([orphan.id]); // busy kept: pending mail; fresh kept: grace
+    const rest = JSON.parse(run(["agents"], d).out).map((a: { id: string }) => a.id).sort();
+    expect(rest).toEqual([busy.id, fresh.id].sort());
+    expect(JSON.parse(run(["poll", "--agent", busy.id], d).out).map((m: { body: string }) => m.body)).toEqual(["keep me"]);
   });
 
   test("reset refuses without --force, wipes with it", () => {
