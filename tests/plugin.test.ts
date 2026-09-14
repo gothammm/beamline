@@ -415,12 +415,13 @@ describe("beamline plugin wake", () => {
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_timeout1" } } });
     await sleep(300);
     expect(prompts).toEqual([]);
-    // Fresh mail: whole pending range goes out exactly once, then acked.
+    // Fresh mail: only the fresh seqs go out (the timed-out batch is
+    // trusted to have landed late — never re-paid), then acked.
     sh(["send", "--from", send.id, "--to", recv.id, "--body", "second"], d);
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_timeout1" } } });
     expect(prompts.length).toBe(1);
     const text = JSON.stringify(prompts[0]);
-    expect(text).toContain("first");
+    expect(text).not.toContain("first");
     expect(text).toContain("second");
     expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
   });
@@ -451,12 +452,13 @@ describe("beamline plugin wake", () => {
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_append1" } } });
     await sleep(500);
     hang = false;
-    // Fresh mail on a tick: context append, no turn, whole pending range.
+    // Fresh mail on a tick: context append, no turn, fresh seqs only (the
+    // timed-out batch is trusted to have landed — never re-paid).
     sh(["send", "--from", send.id, "--to", recv.id, "--body", "m2"], d);
     await sleep(600);
     expect(calls.length).toBe(1);
     expect(calls[0].noReply).toBe(true);
-    expect(calls[0].text).toContain("m1");
+    expect(calls[0].text).not.toContain("m1");
     expect(calls[0].text).toContain("m2");
     expect(JSON.parse(sh(["poll", "--agent", recv.id], d))).toEqual([]);
     // Next idle proves turn-taking: back to a waking turn.
@@ -494,14 +496,81 @@ describe("beamline plugin wake", () => {
       client: { session: { prompt: async (p: unknown) => void prompts.push(p) } },
       directory: d,
     });
-    // Prompt succeeds but ack fails 3x: unmarked, so the next tick/idle
-    // re-prompts the SAME batch promptly (no skip, no ancient replay).
+    // Prompt succeeds but ack fails 3x: marked attempted, so later ticks
+    // retry only the free ack call — never a second paid prompt.
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_ackfail1" } } });
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_ackfail1" } } });
-    expect(prompts.length).toBe(2);
-    expect(JSON.stringify(prompts[0])).toEqual(JSON.stringify(prompts[1]));
+    expect(prompts.length).toBe(1);
     expect(JSON.parse(sh(["poll", "--agent", recv.id], d)).map((m: { body: string }) => m.body)).toEqual(["keep me"]);
     expect(readFileSync(join(d, ".beamline", "oc-events.log"), "utf8")).toContain("ack failed");
+  });
+
+  test("inject preserves the session agent — plan stays plan", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const planRecv = JSON.parse(sh(["link", "--session", "smode1", "--name", "PlanRecv"], d));
+    const buildRecv = JSON.parse(sh(["link", "--session", "smode2", "--name", "BuildRecv"], d));
+    const unknownRecv = JSON.parse(sh(["link", "--session", "smode3", "--name", "UnknownRecv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", planRecv.id, "--body", "plan mail"], d);
+    sh(["send", "--from", send.id, "--to", buildRecv.id, "--body", "build mail"], d);
+    sh(["send", "--from", send.id, "--to", unknownRecv.id, "--body", "mystery mail"], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000"; // explicit idle events only
+    const prompts: { body: { agent?: string; parts: { text: string }[] } }[] = [];
+    const plugin = await BeamlinePlugin({
+      client: {
+        session: {
+          prompt: async (p: { body: { agent?: string; parts: { text: string }[] } }) => void prompts.push(p),
+          get: async (a: { path: { id: string } }) =>
+            a.path.id === "smode1"
+              ? { data: { agent: "plan" } }
+              : a.path.id === "smode2"
+                ? { agent: "build" }
+                : Promise.reject(new Error("session gone")),
+        },
+      },
+      directory: d,
+    });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "smode1" } } });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "smode2" } } });
+    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "smode3" } } });
+    expect(prompts.length).toBe(3);
+    const byText = (t: string) => prompts.find((p) => JSON.stringify(p).includes(t))!;
+    expect(byText("plan mail").body.agent).toBe("plan");
+    expect(byText("build mail").body.agent).toBe("build");
+    // Unknown agent (get failed): key omitted — today's behavior, no escalation by us.
+    expect("agent" in byText("mystery mail").body).toBe(false);
+    expect(JSON.parse(sh(["poll", "--agent", planRecv.id], d))).toEqual([]);
+    expect(JSON.parse(sh(["poll", "--agent", buildRecv.id], d))).toEqual([]);
+    expect(JSON.parse(sh(["poll", "--agent", unknownRecv.id], d))).toEqual([]);
+  });
+
+  test("attempted survives restart: no re-inject after reload", async () => {
+    const d = mkdtempSync(join(tmpdir(), "bl-plugin-"));
+    const recv = JSON.parse(sh(["link", "--session", "ses_persist1", "--name", "Recv"], d));
+    const send = JSON.parse(sh(["register", "--name", "Send"], d));
+    sh(["send", "--from", send.id, "--to", recv.id, "--body", "first"], d);
+
+    process.env.BEAMLINE_HOME = join(import.meta.dir, "..");
+    process.env.BEAMLINE_POLL_MS = "60000"; // explicit idle events only
+    process.env.BEAMLINE_PROMPT_MS = "200";
+    const first = await BeamlinePlugin({
+      client: { session: { prompt: () => new Promise(() => {}) } },
+      directory: d,
+    });
+    await first.event({ event: { type: "session.idle", properties: { sessionID: "ses_persist1" } } });
+    await sleep(500); // timeout fired, attempt persisted, mail retained
+    expect(JSON.parse(readFileSync(join(d, ".beamline", "attempted.json"), "utf8"))["ses_persist1"]).toBeGreaterThan(0);
+    // Fresh process, same workspace: the persisted attempt gates the duplicate.
+    const prompts: unknown[] = [];
+    const second = await BeamlinePlugin({
+      client: { session: { prompt: async (p: unknown) => void prompts.push(p) } },
+      directory: d,
+    });
+    await second.event({ event: { type: "session.idle", properties: { sessionID: "ses_persist1" } } });
+    await sleep(300);
+    expect(prompts).toEqual([]);
   });
 
   test("init never blocks on a hanging session list (silent no-launch repro)", async () => {
